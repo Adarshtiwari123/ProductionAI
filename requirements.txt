@@ -8,3 +8,4 @@ python-jose[cryptography]
 python-dotenv
 pydantic[email]
 pdfminer.six
+python-multipart
