@@ -6,4 +6,5 @@ alembic
 passlib[bcrypt]
 python-jose[cryptography]
 python-dotenv
-pydantic[email]pdfminer.six
+pydantic[email]
+pdfminer.six
