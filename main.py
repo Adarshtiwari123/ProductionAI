@@ -259,7 +259,7 @@ async def upload_resume(
 
     db.commit()
 
-    return _build_profile_response(current_user, db)
+    #return _build_profile_response(current_user, db)# return _build_profile_response(current_user, db)  # ✅ commented
 
     # ── Create Resume record in resumes table ─────────────────────────────────
     skills_str = sections.get("technical_skills", "") or ""
