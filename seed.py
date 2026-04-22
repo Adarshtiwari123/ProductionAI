@@ -17,7 +17,7 @@ def seed_attributes(db):
                 type=attr["type"]
             ))
     db.commit()
-    print("✅ Attributes seeded successfully")
+    print("[OK] Attributes seeded successfully")
 
 
 def get_or_create_attribute(db, code: str, name: str = None, type: str = "text"):
@@ -37,5 +37,5 @@ def get_or_create_attribute(db, code: str, name: str = None, type: str = "text")
         db.add(attr)
         db.commit()
         db.refresh(attr)
-        print(f"✅ New attribute created dynamically: {code}")
+        print(f"[OK] New attribute created dynamically: {code}")
     return attr

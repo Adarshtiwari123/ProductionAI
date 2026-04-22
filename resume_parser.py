@@ -1,7 +1,14 @@
 import re
 import io
+import base64
 from pdfminer.high_level import extract_pages, extract_text
 from pdfminer.layout import LTTextBox, LAParams
+
+try:
+    import fitz  # PyMuPDF — used for image extraction
+    _FITZ_AVAILABLE = True
+except ImportError:
+    _FITZ_AVAILABLE = False
 
 STANDARD_ATTRIBUTES = [
     {"code": "objective",               "name": "Objective",                "type": "text"},
@@ -38,6 +45,32 @@ SECTION_PATTERNS = {
     "personal_details": r'(?:PERSONAL\s+DETAILS?|PERSONAL\s+INFORMATION|PERSONAL\s+PROFILE|PERSONAL\s+DATA)',
     "contact": r'(?:CONTACT(?:\s+DETAILS?|\s+INFO(?:RMATION)?)?)',
 }
+
+
+def extract_image_from_pdf(file_bytes: bytes) -> str | None:
+    """
+    Extract the first embedded image from a PDF (likely a profile photo).
+    Returns a Base64-encoded data URI string, or None if no image found
+    or PyMuPDF is not available.
+    """
+    if not _FITZ_AVAILABLE:
+        return None
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for page in doc:
+            image_list = page.get_images(full=True)
+            for img in image_list:
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image.get("image")
+                ext = base_image.get("ext", "png")
+                if image_bytes and len(image_bytes) > 1000:   # skip tiny icons
+                    b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    return f"data:image/{ext};base64,{b64}"
+        doc.close()
+    except Exception as e:
+        print(f"Image extraction error: {e}")
+    return None
 
 
 def extract_columns(file_bytes: bytes):

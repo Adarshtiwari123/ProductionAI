@@ -1,4 +1,8 @@
+import os
+import uuid
+
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -6,10 +10,14 @@ from jose import JWTError
 
 import models, schemas, auth
 from database import engine, get_db
-from resume_parser import parse_resume, detect_dynamic_sections, STANDARD_ATTRIBUTES
+from resume_parser import parse_resume, detect_dynamic_sections, STANDARD_ATTRIBUTES, extract_image_from_pdf
 from seed import seed_attributes, get_or_create_attribute
 
-# ── Create all tables ────────────────────────────────────────────────────────
+# ── Ensure upload directory exists ───────────────────────────────────────────
+BASE_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads", "resumes")
+os.makedirs(BASE_UPLOAD_DIR, exist_ok=True)
+
+# ── Create / sync all tables ─────────────────────────────────────────────────
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="InterviewAI API", version="2.0")
@@ -30,7 +38,7 @@ app.add_middleware(
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
-token_blacklist = set()
+token_blacklist: set = set()
 
 
 # ── Seed attributes on startup ───────────────────────────────────────────────
@@ -78,7 +86,6 @@ def get_current_user(
 def register(payload: schemas.RegisterRequest, db: Session = Depends(get_db)):
     if db.query(models.User).filter(models.User.username == payload.username).first():
         raise HTTPException(status_code=400, detail="Username already taken")
-
     if db.query(models.User).filter(models.User.email == payload.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
@@ -140,8 +147,8 @@ def get_me(current_user: models.User = Depends(get_current_user)):
 # 5. UPLOAD RESUME
 # ════════════════════════════════════════════════════
 
-@app.post("/upload-resume", response_model=schemas.UserProfileResponse,
-          summary="Upload PDF resume — auto extracts and stores all sections")
+@app.post("/upload-resume",
+          summary="Upload PDF resume — parses, stores file, extracts skills & photo")
 async def upload_resume(
     file: UploadFile = File(...),
     current_user: models.User = Depends(get_current_user),
@@ -151,9 +158,12 @@ async def upload_resume(
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
 
     file_bytes = await file.read()
-    if len(file_bytes) > 5 * 1024 * 1024:
+    file_size  = len(file_bytes)
+
+    if file_size > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File size must be less than 5MB")
 
+    # ── Parse resume ──────────────────────────────────────────────────────────
     try:
         parsed = parse_resume(file_bytes)
     except Exception as e:
@@ -163,6 +173,7 @@ async def upload_resume(
     personal = parsed["personal"]
     sections = parsed["sections"]
     raw_text = parsed["raw_text"]
+
 
     # Update user personal info from resume
     if personal.get("name"):
@@ -175,11 +186,32 @@ async def upload_resume(
 
     # Detect and create dynamic sections
     known_codes = [a["code"] for a in STANDARD_ATTRIBUTES]
+
+    # NOTE: users table (name, phone, email) is set ONLY at registration.
+    # Resume parsing never overwrites user account data.
+
+    # ── Detect & store dynamic sections ───────────────────────────────────────
+    known_codes  = [a["code"] for a in STANDARD_ATTRIBUTES]
     dynamic_attrs = detect_dynamic_sections(raw_text, known_codes)
     for dattr in dynamic_attrs:
         get_or_create_attribute(db, dattr["code"], dattr["name"], dattr["type"])
 
+
     # Store each section into user_profile
+    # ── Save PDF file to disk ─────────────────────────────────────────────────
+    # Use uuid prefix to guarantee uniqueness even if same filename is re-uploaded.
+    user_dir  = os.path.join(BASE_UPLOAD_DIR, str(current_user.id))
+    os.makedirs(user_dir, exist_ok=True)
+    safe_name = f"{uuid.uuid4().hex}_{file.filename}"
+    file_path = os.path.join(user_dir, safe_name)
+    with open(file_path, "wb") as f:
+        f.write(file_bytes)
+
+    # ── Extract profile photo ─────────────────────────────────────────────────
+    user_image_b64 = extract_image_from_pdf(file_bytes)
+
+    # ── Store each parsed section into user_profile ───────────────────────────
+
     for code, value in sections.items():
         if not value:
             continue
@@ -190,19 +222,158 @@ async def upload_resume(
         ).first()
         if existing:
             existing.attribute_value = value
+            # Update resume_path and user_image on every re-upload
+            existing.resume_path = file_path
+            if user_image_b64:
+                existing.user_image = user_image_b64
         else:
             db.add(models.UserProfile(
-                user_id=current_user.id,
-                attribute_id=attr.id,
-                attribute_value=value
+                user_id         = current_user.id,
+                attribute_id    = attr.id,
+                attribute_value = value,
+                resume_path     = file_path,
+                user_image      = user_image_b64 if user_image_b64 else None
+            ))
+
+    # ── If no sections were parsed, still create at least one profile row ──────
+    # so that resume_path & user_image are persisted even for sparse resumes.
+    if not sections:
+        # Use a generic placeholder attribute
+        placeholder_attr = get_or_create_attribute(db, "resume_uploaded", "Resume Uploaded", "text")
+        existing = db.query(models.UserProfile).filter(
+            models.UserProfile.user_id == current_user.id,
+            models.UserProfile.attribute_id == placeholder_attr.id
+        ).first()
+        if existing:
+            existing.resume_path = file_path
+            if user_image_b64:
+                existing.user_image = user_image_b64
+        else:
+            db.add(models.UserProfile(
+                user_id         = current_user.id,
+                attribute_id    = placeholder_attr.id,
+                attribute_value = "true",
+                resume_path     = file_path,
+                user_image      = user_image_b64 if user_image_b64 else None
             ))
 
     db.commit()
+
     return _build_profile_response(current_user, db)
+
+    # ── Create Resume record in resumes table ─────────────────────────────────
+    skills_str = sections.get("technical_skills", "") or ""
+    resume_record = models.Resume(
+        user_id     = current_user.id,
+        resume_name = file.filename,          # original name (duplicate names allowed)
+        file_path   = file_path,
+        file_size   = file_size,
+        mime_type   = "application/pdf",
+        skills      = skills_str or None,
+    )
+    db.add(resume_record)
+    db.commit()
+    db.refresh(resume_record)
+
+    return {
+        "success": True,
+        "message": "Resume uploaded and parsed successfully",
+        "data": _build_resume_data(resume_record)
+    }
+
 
 
 # ════════════════════════════════════════════════════
-# 6. GET PROFILE
+# 6. LIST ALL RESUMES for current user
+# ════════════════════════════════════════════════════
+
+@app.get("/resumes", summary="List all uploaded resumes for current user")
+def list_resumes(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Strictly filter by the authenticated user's ID — no other user's data is returned
+    records = db.query(models.Resume).filter(
+        models.Resume.user_id == current_user.id
+    ).order_by(models.Resume.uploaded_date.desc()).all()
+
+    return {
+        "success":      True,
+        "logged_in_as": current_user.username,   # confirms which user's data this is
+        "user_id":      current_user.id,
+        "message":      f"{len(records)} resume(s) found",
+        "data":         [_build_resume_data(r) for r in records]
+    }
+
+
+# ════════════════════════════════════════════════════
+# 7. VIEW RESUME (inline in browser)
+# ════════════════════════════════════════════════════
+
+@app.get("/resume/{resume_id}/view", summary="View resume PDF inline in browser")
+def view_resume(
+    resume_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    record = _get_resume_or_404(resume_id, current_user.id, db)
+    if not os.path.exists(record.file_path):
+        raise HTTPException(status_code=404, detail="Resume file not found on server")
+    return FileResponse(
+        path       = record.file_path,
+        media_type = "application/pdf",
+        filename   = record.resume_name,
+        headers    = {"Content-Disposition": f"inline; filename=\"{record.resume_name}\""}
+    )
+
+
+# ════════════════════════════════════════════════════
+# 8. DOWNLOAD RESUME (as attachment)
+# ════════════════════════════════════════════════════
+
+@app.get("/resume/{resume_id}/download", summary="Download resume PDF as file")
+def download_resume(
+    resume_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    record = _get_resume_or_404(resume_id, current_user.id, db)
+    if not os.path.exists(record.file_path):
+        raise HTTPException(status_code=404, detail="Resume file not found on server")
+    return FileResponse(
+        path       = record.file_path,
+        media_type = "application/pdf",
+        filename   = record.resume_name,
+        headers    = {"Content-Disposition": f"attachment; filename=\"{record.resume_name}\""}
+    )
+
+
+# ════════════════════════════════════════════════════
+# 9. DELETE RESUME
+# ════════════════════════════════════════════════════
+
+@app.delete("/resume/{resume_id}", summary="Delete a specific resume")
+def delete_resume(
+    resume_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    record = _get_resume_or_404(resume_id, current_user.id, db)
+
+    # Remove file from disk
+    if os.path.exists(record.file_path):
+        os.remove(record.file_path)
+
+    db.delete(record)
+    db.commit()
+    return {
+        "success": True,
+        "message": f"Resume '{record.resume_name}' deleted successfully"
+    }
+
+
+# ════════════════════════════════════════════════════
+# 10. GET PROFILE
 # ════════════════════════════════════════════════════
 
 @app.get("/profile", response_model=schemas.UserProfileResponse,
@@ -225,7 +396,7 @@ def get_profile(
 
 
 # ════════════════════════════════════════════════════
-# 7. UPDATE PROFILE FIELD
+# 11. UPDATE PROFILE FIELD
 # ════════════════════════════════════════════════════
 
 @app.put("/profile", response_model=schemas.UserProfileResponse,
@@ -254,9 +425,9 @@ def update_profile(
         existing.attribute_value = payload.attribute_value
     else:
         db.add(models.UserProfile(
-            user_id=current_user.id,
-            attribute_id=attr.id,
-            attribute_value=payload.attribute_value
+            user_id      = current_user.id,
+            attribute_id = attr.id,
+            attribute_value = payload.attribute_value
         ))
 
     db.commit()
@@ -264,7 +435,7 @@ def update_profile(
 
 
 # ════════════════════════════════════════════════════
-# 8. LIST ALL ATTRIBUTES
+# 12. LIST ALL ATTRIBUTES
 # ════════════════════════════════════════════════════
 
 @app.get("/attributes", response_model=list[schemas.AttributeResponse],
@@ -274,7 +445,7 @@ def list_attributes(db: Session = Depends(get_db)):
 
 
 # ════════════════════════════════════════════════════
-# 9. DELETE USER (cascades to profile)
+# 13. DELETE USER (cascades to profile & resumes)
 # ════════════════════════════════════════════════════
 
 @app.delete("/user", summary="Delete current user and all profile data")
@@ -288,32 +459,117 @@ def delete_user(
 
 
 # ════════════════════════════════════════════════════
-# HELPER
+# 14. CHANGE PASSWORD
+# FIX: New password must differ from old password.
 # ════════════════════════════════════════════════════
 
+@app.post("/change-password", summary="Change user password")
+def change_password(
+    payload: schemas.ChangePasswordRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # 1. Verify old password is correct
+    if not auth.verify_password(payload.old_password, current_user.password):
+        raise HTTPException(status_code=400, detail="Incorrect old password")
+
+    # 2. New and confirm passwords must match
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="New passwords do not match")
+
+    # 3. New password must NOT be the same as old password
+    if auth.verify_password(payload.new_password, current_user.password):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from your current password"
+        )
+
+    current_user.password = auth.hash_password(payload.new_password)
+    db.commit()
+    return {"message": "Password updated successfully", "success": True}
+
+
+# ════════════════════════════════════════════════════
+# HELPERS
+# ════════════════════════════════════════════════════
+
+def _format_size(size_bytes: int) -> str:
+    """Convert bytes to human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{round(size_bytes / 1024, 1)} KB"
+    else:
+        return f"{round(size_bytes / (1024 * 1024), 2)} MB"
+
+
+def _build_resume_data(record: models.Resume) -> dict:
+    """Build the dict that maps to ResumeData schema."""
+    skills_list = []
+    if record.skills:
+        skills_list = [s.strip() for s in record.skills.split(",") if s.strip()]
+
+    # Format date as "April 22, 2026" — DB stores full datetime, response shows date only
+    formatted_date = record.uploaded_date.strftime("%B %d, %Y")
+
+    return {
+        "resume_id":       record.id,
+        "resume_name":     record.resume_name,
+        "size":            _format_size(record.file_size),
+        "uploaded_date":   formatted_date,
+        "skills":          skills_list,
+        "view_resume":     f"/resume/{record.id}/view",
+        "download_resume": f"/resume/{record.id}/download",
+        "delete_resume":   f"/resume/{record.id}",
+    }
+
+
+def _get_resume_or_404(resume_id: int, user_id: int, db: Session) -> models.Resume:
+    """Fetch a resume, ensuring it belongs to the current user."""
+    record = db.query(models.Resume).filter(
+        models.Resume.id == resume_id,
+        models.Resume.user_id == user_id
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    return record
+
+
 def _build_profile_response(user: models.User, db: Session) -> dict:
+    """Build the full profile response with all attribute sections."""
     entries = db.query(models.UserProfile).filter(
         models.UserProfile.user_id == user.id
     ).all()
 
     profile_items = []
+    seen_codes = set()
+
     for entry in entries:
         attr = db.query(models.Attribute).filter(
             models.Attribute.id == entry.attribute_id
         ).first()
-        if attr:
+        if attr and attr.code not in seen_codes:
+            seen_codes.add(attr.code)
             profile_items.append({
-                "attribute_code": attr.code,
-                "attribute_name": attr.name,
+                "attribute_code":  attr.code,
+                "attribute_name":  attr.name,
                 "attribute_value": entry.attribute_value
             })
 
+    # Get resume_path from the first profile entry that has one
+    resume_path = None
+    for entry in entries:
+        if entry.resume_path:
+            resume_path = entry.resume_path
+            break
+
     return {
-        "user_id": user.id,
-        "username": user.username,
-        "name": user.name,
-        "email": user.email,
-        "profile": profile_items
+        "user_id":     user.id,
+        "username":    user.username,
+        "name":        user.name,
+        "email":       user.email,
+        "resume_path": resume_path,
+        "profile":     profile_items
     }
 # from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 # from fastapi.security import OAuth2PasswordBearer
@@ -931,3 +1187,5 @@ def _build_profile_response(user: models.User, db: Session) -> dict:
 # #         "email": user.email,
 # #         "profile": profile_items
 # #     }
+=======
+>>>>>>> 4d18324 (new feature added)
