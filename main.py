@@ -1187,5 +1187,4 @@ def _build_profile_response(user: models.User, db: Session) -> dict:
 # #         "email": user.email,
 # #         "profile": profile_items
 # #     }
-=======
->>>>>>> 4d18324 (new feature added)
+
