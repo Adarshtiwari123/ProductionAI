@@ -170,19 +170,12 @@ async def upload_resume(
         print(f"PARSE ERROR: {e}")
         raise HTTPException(status_code=500, detail=f"Resume parsing failed: {str(e)}")
 
-    personal = parsed["personal"]
     sections = parsed["sections"]
     raw_text = parsed["raw_text"]
 
-
-    # Update user personal info from resume
-    if personal.get("name"):
-        current_user.name = personal["name"][:30]
-    if personal.get("email") and personal["email"] != current_user.email:
-        current_user.email = personal["email"][:30]
-    if personal.get("phone"):
-        current_user.phone = personal["phone"][:20]
-    db.commit()
+    # NOTE: We never touch the USERS table here.
+    # name / email / phone are set only at registration
+    # and will only be editable via a dedicated update_user API in future.
 
     # Detect and create dynamic sections
     known_codes = [a["code"] for a in STANDARD_ATTRIBUTES]
@@ -260,6 +253,20 @@ async def upload_resume(
     db.commit()
 
     #return _build_profile_response(current_user, db)# return _build_profile_response(current_user, db)  # ✅ commented
+
+    # ── Delete any existing resume for this user (one resume per user policy) ──
+    old_records = db.query(models.Resume).filter(
+        models.Resume.user_id == current_user.id
+    ).all()
+    for old in old_records:
+        # Remove old file from disk if it exists
+        if old.file_path and os.path.exists(old.file_path):
+            try:
+                os.remove(old.file_path)
+            except Exception:
+                pass  # If file deletion fails, still proceed
+        db.delete(old)
+    db.commit()
 
     # ── Create Resume record in resumes table ─────────────────────────────────
     skills_str = sections.get("technical_skills", "") or ""
@@ -507,7 +514,12 @@ def _build_resume_data(record: models.Resume) -> dict:
     """Build the dict that maps to ResumeData schema."""
     skills_list = []
     if record.skills:
-        skills_list = [s.strip() for s in record.skills.split(",") if s.strip()]
+        raw_skills = [s.strip() for s in record.skills.split(",") if s.strip()]
+        skills_list = [
+            s for s in raw_skills
+            if not (s.isupper() and len(s.split()) <= 3)  # drop section headers e.g. "STRENGTHS", "SKILLS"
+            and "(cid:" not in s                           # drop PDF bullet glyph entries e.g. "(cid:127) Strong Analytical..."
+        ]
 
     # Format date as "April 22, 2026" — DB stores full datetime, response shows date only
     formatted_date = record.uploaded_date.strftime("%B %d, %Y")
@@ -1187,4 +1199,3 @@ def _build_profile_response(user: models.User, db: Session) -> dict:
 # #         "email": user.email,
 # #         "profile": profile_items
 # #     }
-
