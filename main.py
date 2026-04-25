@@ -30,7 +30,7 @@ os.makedirs(BASE_UPLOAD_DIR, exist_ok=True)
 async def lifespan(app: FastAPI):
     # ── Database Initialization ──────────────────────────────────────────────
     try:
-        #migrate_schema(engine)
+        migrate_schema(engine)
         models.Base.metadata.create_all(bind=engine)
         db = next(get_db())
         try:
