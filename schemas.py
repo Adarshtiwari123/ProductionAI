@@ -74,6 +74,18 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
+# ── Update User Profile Schemas ───────────────────────────────────────────────
+
+class UpdateUserProfileResponse(BaseModel):
+    """Returned after a successful profile update."""
+    success: bool = True
+    message: str
+    data: dict  # contains user_id, username, first_name, last_name, email, phone, user_image
+
+    class Config:
+        from_attributes = True
+
+
 # ── Attribute Schemas ─────────────────────────────────────────────────────────
 
 class AttributeResponse(BaseModel):
@@ -103,6 +115,7 @@ class UserProfileResponse(BaseModel):
     name: str
     email: str
     resume_path: Optional[str] = None   # path of the last uploaded resume on disk
+    user_image: Optional[str] = None    # path or base64 of the profile image
     profile: List[UserProfileItem] = []
 
     class Config:

@@ -1,12 +1,13 @@
 import os
 import uuid
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from jose import JWTError
+from typing import Optional
 
 import models, schemas, auth
 from database import engine, get_db
@@ -203,52 +204,36 @@ async def upload_resume(
     # ── Extract profile photo ─────────────────────────────────────────────────
     user_image_b64 = extract_image_from_pdf(file_bytes)
 
-    # ── Store each parsed section into user_profile ───────────────────────────
+    # ── Clear old profile entries so we only keep data from the new resume ──────
+    db.query(models.UserProfile).filter(
+        models.UserProfile.user_id == current_user.id
+    ).delete(synchronize_session=False)
 
+    # ── Store each parsed section into user_profile ───────────────────────────
     for code, value in sections.items():
         if not value:
             continue
         attr = get_or_create_attribute(db, code)
-        existing = db.query(models.UserProfile).filter(
-            models.UserProfile.user_id == current_user.id,
-            models.UserProfile.attribute_id == attr.id
-        ).first()
-        if existing:
-            existing.attribute_value = value
-            # Update resume_path and user_image on every re-upload
-            existing.resume_path = file_path
-            if user_image_b64:
-                existing.user_image = user_image_b64
-        else:
-            db.add(models.UserProfile(
-                user_id         = current_user.id,
-                attribute_id    = attr.id,
-                attribute_value = value,
-                resume_path     = file_path,
-                user_image      = user_image_b64 if user_image_b64 else None
-            ))
+        db.add(models.UserProfile(
+            user_id         = current_user.id,
+            attribute_id    = attr.id,
+            attribute_value = value,
+            resume_path     = file_path,
+            user_image      = user_image_b64 if user_image_b64 else None
+        ))
 
     # ── If no sections were parsed, still create at least one profile row ──────
     # so that resume_path & user_image are persisted even for sparse resumes.
     if not sections:
         # Use a generic placeholder attribute
         placeholder_attr = get_or_create_attribute(db, "resume_uploaded", "Resume Uploaded", "text")
-        existing = db.query(models.UserProfile).filter(
-            models.UserProfile.user_id == current_user.id,
-            models.UserProfile.attribute_id == placeholder_attr.id
-        ).first()
-        if existing:
-            existing.resume_path = file_path
-            if user_image_b64:
-                existing.user_image = user_image_b64
-        else:
-            db.add(models.UserProfile(
-                user_id         = current_user.id,
-                attribute_id    = placeholder_attr.id,
-                attribute_value = "true",
-                resume_path     = file_path,
-                user_image      = user_image_b64 if user_image_b64 else None
-            ))
+        db.add(models.UserProfile(
+            user_id         = current_user.id,
+            attribute_id    = placeholder_attr.id,
+            attribute_value = "true",
+            resume_path     = file_path,
+            user_image      = user_image_b64 if user_image_b64 else None
+        ))
 
     db.commit()
 
@@ -400,6 +385,171 @@ def get_profile(
         )
 
     return _build_profile_response(current_user, db)
+
+
+# ════════════════════════════════════════════════════
+# 10b. UPDATE USER PROFILE — text fields via JSON body
+#      PUT /update-profile
+#      Body: { "first_name", "last_name", "email", "phone" }  (all optional)
+# ════════════════════════════════════════════════════
+
+class _UpdateProfilePayload(schemas.BaseModel):
+    first_name: Optional[str] = None
+    last_name:  Optional[str] = None
+    email:      Optional[str] = None
+    phone:      Optional[str] = None
+
+@app.put("/update-profile",
+         summary="Update user profile text fields (first_name, last_name, email, phone) — send as JSON")
+def update_user_profile(
+    payload:      _UpdateProfilePayload,
+    current_user: models.User = Depends(get_current_user),
+    db:           Session     = Depends(get_db)
+):
+    """
+    Updates the authenticated user's record in the **users** table.
+
+    Send as **raw JSON** (Content-Type: application/json):
+    ```json
+    {
+        "first_name": "Adarsh",
+        "last_name":  "Tiwari",
+        "email":      "newemail@gmail.com",
+        "phone":      "7505965253"
+    }
+    ```
+    All fields are optional — only fields you include are updated.
+    """
+
+    # ── Build new full name ────────────────────────────────────────────────────
+    existing_parts = (current_user.name or "").split(" ", 1)
+    existing_first = existing_parts[0] if len(existing_parts) > 0 else ""
+    existing_last  = existing_parts[1] if len(existing_parts) > 1 else ""
+
+    new_first = payload.first_name.strip() if payload.first_name is not None else existing_first
+    new_last  = payload.last_name.strip()  if payload.last_name  is not None else existing_last
+    new_name  = f"{new_first} {new_last}".strip()
+
+    if new_name and len(new_name) > 30:
+        raise HTTPException(status_code=400, detail="Full name must be max 30 characters")
+
+    # ── Email uniqueness check ─────────────────────────────────────────────────
+    if payload.email is not None:
+        new_email = payload.email.strip()
+        conflict = db.query(models.User).filter(
+            models.User.email == new_email,
+            models.User.id    != current_user.id
+        ).first()
+        if conflict:
+            raise HTTPException(status_code=400, detail="Email is already used by another account")
+    else:
+        new_email = current_user.email   # keep existing
+
+    # ── Write to users table & commit ─────────────────────────────────────────
+    if new_name:
+        current_user.name  = new_name
+    current_user.email = new_email
+    if payload.phone is not None:
+        current_user.phone = payload.phone.strip()
+
+    db.commit()
+    db.refresh(current_user)
+
+    # ── Read back stored image path (if any) ─────────────────────────────────
+    img_row    = db.query(models.UserProfile).filter(
+        models.UserProfile.user_id    == current_user.id,
+        models.UserProfile.user_image.isnot(None)
+    ).first()
+    image_path = img_row.user_image if img_row else None
+
+    # ── Build response ────────────────────────────────────────────────────────
+    stored_parts = (current_user.name or "").split(" ", 1)
+    resp_first   = stored_parts[0] if len(stored_parts) > 0 else ""
+    resp_last    = stored_parts[1] if len(stored_parts) > 1 else ""
+
+    return {
+        "success": True,
+        "message": "Profile updated successfully",
+        "data": {
+            "user_id":    current_user.id,
+            "username":   current_user.username,
+            "first_name": resp_first,
+            "last_name":  resp_last,
+            "email":      current_user.email,
+            "phone":      current_user.phone,
+            "user_image": image_path,
+        }
+    }
+
+
+# ════════════════════════════════════════════════════
+# 10c. UPLOAD PROFILE IMAGE
+#      PUT /update-profile/image
+#      Body: multipart/form-data  →  profile_image (file)
+# ════════════════════════════════════════════════════
+
+@app.put("/update-profile/image",
+         summary="Upload / change profile avatar image — send as multipart/form-data")
+async def update_profile_image(
+    profile_image:  UploadFile  = File(..., description="Profile image — JPEG, PNG, GIF, or WebP"),
+    current_user:  models.User = Depends(get_current_user),
+    db:            Session     = Depends(get_db)
+):
+    """
+    Upload a new profile avatar.
+
+    - Saves the file under **uploads/profile_images/{user_id}/**.
+    - Stores the local file **path** in `user_profile.user_image`.
+    - Creates a placeholder row if the user has no profile rows yet.
+    """
+
+    allowed_types = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+    content_type  = (profile_image.content_type or "").lower()
+    if content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Profile image must be JPEG, PNG, GIF, or WebP")
+
+    img_bytes = await profile_image.read()
+    if len(img_bytes) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Profile image must be less than 2 MB")
+
+    # ── Save file to disk ─────────────────────────────────────────────────────
+    img_dir   = os.path.join(os.path.dirname(__file__), "uploads", "profile_images", str(current_user.id))
+    os.makedirs(img_dir, exist_ok=True)
+
+    ext        = os.path.splitext(profile_image.filename or "image.jpg")[1] or ".jpg"
+    img_name   = f"{uuid.uuid4().hex}{ext}"
+    image_path = os.path.join(img_dir, img_name)
+
+    with open(image_path, "wb") as img_file:
+        img_file.write(img_bytes)
+
+    # ── Store path in user_profile.user_image ─────────────────────────────────
+    profile_rows = db.query(models.UserProfile).filter(
+        models.UserProfile.user_id == current_user.id
+    ).all()
+
+    if profile_rows:
+        for row in profile_rows:
+            row.user_image = image_path
+    else:
+        placeholder_attr = get_or_create_attribute(db, "profile_image", "Profile Image", "text")
+        db.add(models.UserProfile(
+            user_id         = current_user.id,
+            attribute_id    = placeholder_attr.id,
+            attribute_value = "uploaded",
+            user_image      = image_path,
+        ))
+
+    db.commit()
+
+    return {
+        "success":    True,
+        "message":    "Profile image uploaded successfully",
+        "user_image": image_path,
+    }
+
+
+
 
 
 # ════════════════════════════════════════════════════
@@ -568,12 +718,14 @@ def _build_profile_response(user: models.User, db: Session) -> dict:
                 "attribute_value": entry.attribute_value
             })
 
-    # Get resume_path from the first profile entry that has one
+    # Get resume_path and user_image from the first profile entry that has them
     resume_path = None
+    user_image = None
     for entry in entries:
-        if entry.resume_path:
+        if not resume_path and entry.resume_path:
             resume_path = entry.resume_path
-            break
+        if not user_image and entry.user_image:
+            user_image = entry.user_image
 
     return {
         "user_id":     user.id,
@@ -581,6 +733,7 @@ def _build_profile_response(user: models.User, db: Session) -> dict:
         "name":        user.name,
         "email":       user.email,
         "resume_path": resume_path,
+        "user_image":  user_image,
         "profile":     profile_items
     }
 # from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
