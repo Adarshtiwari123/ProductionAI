@@ -56,6 +56,14 @@ def migrate_schema(engine):
                 print("🔹 Adding 'resume_id' to 'user_profile'...")
                 conn.execute(text("ALTER TABLE user_profile ADD COLUMN resume_id INTEGER REFERENCES resumes(id) ON DELETE CASCADE"))
                 conn.commit()
+
+            # Add timestamps if missing
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='user_profile' AND column_name='created_at'")).fetchone()
+            if not res:
+                print("🔹 Adding timestamps to 'user_profile' table...")
+                conn.execute(text("ALTER TABLE user_profile ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+                conn.execute(text("ALTER TABLE user_profile ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+                conn.commit()
         except Exception as e:
             print(f"⚠️ 'user_profile' migration note: {e}")
 
