@@ -4,21 +4,27 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(env_path, override=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Debug print to verify which database is being used
+if DATABASE_URL:
+    from urllib.parse import urlparse
+    parsed = urlparse(DATABASE_URL)
+    print(f"🔌 Database connected to: {parsed.hostname} on port {parsed.port}")
+else:
+    print("❌ No DATABASE_URL found")
 
 # Render sometimes gives "postgres://", but SQLAlchemy requires "postgresql://"
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# Fallback to local SQLite if DATABASE_URL is missing or appears to be an internal Render host
-# (Internal hosts like 'dpg-...' don't resolve outside Render's network)
-if not DATABASE_URL or "dpg-" in DATABASE_URL:
-    print("⚠️  Warning: DATABASE_URL is missing or internal. Falling back to local SQLite: ./interview_ai.db")
-    DATABASE_URL = "sqlite:///./interview_ai.db"
+if not DATABASE_URL:
+    raise RuntimeError("❌ DATABASE_URL is not set in the environment or .env file.")
 
-# For SQLite, we need 'check_same_thread=False'
+# For SQLite, we need 'check_same_thread=False' (keeping this logic in case of explicit SQLite use)
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 engine = create_engine(DATABASE_URL, connect_args=connect_args)

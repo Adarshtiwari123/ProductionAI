@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from jose import JWTError
 from typing import Optional, List
+from sqlalchemy import text
 import models, schemas, auth
 from database import engine, get_db
 from resume_parser import parse_resume, detect_dynamic_sections, STANDARD_ATTRIBUTES, extract_image_from_pdf
@@ -30,16 +31,29 @@ os.makedirs(BASE_UPLOAD_DIR, exist_ok=True)
 async def lifespan(app: FastAPI):
     # ── Database Initialization ──────────────────────────────────────────────
     try:
+        print("🚀 Starting database initialization...")
+        
+        # 1. Run manual migrations (renaming columns, etc.)
         migrate_schema(engine)
+        
+        # 2. Create missing tables (Packages, Subscriptions, Payments, etc.)
+        print("🔨 Syncing tables with models...")
         models.Base.metadata.create_all(bind=engine)
+        
+        # 3. Seed initial data
         db = next(get_db())
         try:
+            print("🌱 Seeding initial data...")
             seed_attributes(db)
             seed_packages(db)
+            print("✅ Database setup completed successfully!")
         finally:
             db.close()
+            
     except Exception as e:
         print(f"❌ Error during database initialization: {e}")
+        import traceback
+        traceback.print_exc()
     yield
 
 app = FastAPI(title="InterviewAI API", version="2.0", lifespan=lifespan)
