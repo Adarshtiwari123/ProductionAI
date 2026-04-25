@@ -242,7 +242,37 @@ def parse_resume(file_bytes: bytes) -> dict:
     print(f"DEBUG personal: {personal}")
     print(f"DEBUG sections found: {list(sections.keys())}")
 
-    return {"personal": personal, "sections": sections, "raw_text": combined_text}
+    domain = detect_domain(combined_text)
+
+    return {"personal": personal, "sections": sections, "raw_text": combined_text, "domain": domain}
+
+
+def detect_domain(text: str) -> str | None:
+    """
+    Attempt to identify the professional domain (e.g. 'Full Stack Developer', 'Data Scientist')
+    based on common job titles and keyword patterns.
+    """
+    domains = [
+        r'(?:Full[\s-]?Stack|Frontend|Backend|Web|Software|Mobile|App|React|Angular|Vue|Node|Java|Python|Go|Rust|C\+\+|PHP|Laravel)\s+Developer',
+        r'Data\s+(?:Scientist|Analyst|Engineer)',
+        r'Machine\s+Learning\s+Engineer|AI\s+Engineer',
+        r'UI[/\s]?UX\s+Designer|Graphic\s+Designer|Product\s+Designer',
+        r'DevOps\s+Engineer|Cloud\s+(?:Architect|Engineer)|SRE',
+        r'Cybersecurity\s+(?:Analyst|Engineer|Specialist)',
+        r'Product\s+Manager|Project\s+Manager|Program\s+Manager',
+        r'Digital\s+Marketer|SEO\s+Specialist|Content\s+Writer',
+        r'Sales\s+(?:Executive|Manager|Representative)',
+        r'Business\s+(?:Analyst|Developer|Manager)',
+        r'Human\s+Resources|HR\s+(?:Manager|Specialist|Generalist)',
+        r'Chartered\s+Accountant|Financial\s+Analyst|Accountant',
+    ]
+
+    for pattern in domains:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return m.group(0).strip().title()
+
+    return None
 # import re
 # from pdfminer.high_level import extract_text
 # import io

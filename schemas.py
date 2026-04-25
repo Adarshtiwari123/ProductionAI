@@ -68,7 +68,8 @@ class UserResponse(BaseModel):
     name: str
     email: str
     phone: str
-    is_approved: int
+    pic: Optional[str] = None
+    is_valid: int
 
     class Config:
         from_attributes = True
@@ -103,7 +104,7 @@ class AttributeResponse(BaseModel):
 class UserProfileItem(BaseModel):
     attribute_code: str
     attribute_name: str
-    attribute_value: Optional[str] = None
+    values: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -124,7 +125,7 @@ class UserProfileResponse(BaseModel):
 
 class UpdateProfileRequest(BaseModel):
     attribute_code: str
-    attribute_value: str
+    values: str
 
 
 # ── Change Password ───────────────────────────────────────────────────────────
@@ -155,8 +156,9 @@ class ResumeData(BaseModel):
     resume_id:       int
     resume_name:     str
     size:            str                    # Human-readable, e.g. "256 KB"
-    uploaded_date:   str                    # Formatted as "April 22, 2026"
+    updated_at:      str                    # Formatted as "April 22, 2026"
     skills:          List[str] = []         # List of individual skills
+    domain:          Optional[str] = None
     view_resume:     str                    # URL path to view inline
     download_resume: str                    # URL path to download
     delete_resume:   str                    # URL path to delete
@@ -177,3 +179,40 @@ class ResumeListResponse(BaseModel):
     success: bool = True
     message: str
     data:    List[ResumeData] = []
+
+
+# ── Packages & Payments (New) ────────────────────────────────────────────────
+
+class PackageResponse(BaseModel):
+    id: int
+    name: str
+    price: float
+    interview_limit: int
+    features: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SubscriptionResponse(BaseModel):
+    id: int
+    package_id: int
+    start_date: datetime
+    end_date: datetime
+    status: str
+
+    class Config:
+        from_attributes = True
+
+
+class PaymentResponse(BaseModel):
+    id: int
+    subscription_id: int
+    amount: float
+    payment_method: str
+    status: str
+    transaction_id: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

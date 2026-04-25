@@ -1,5 +1,10 @@
 import os
 import uuid
+import contextlib
+import sys
+
+# Add current directory to sys.path to support both direct run and module run
+sys.path.append(os.path.dirname(__file__))
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -7,21 +12,37 @@ from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from jose import JWTError
-from typing import Optional
-
+from typing import Optional, List
 import models, schemas, auth
 from database import engine, get_db
 from resume_parser import parse_resume, detect_dynamic_sections, STANDARD_ATTRIBUTES, extract_image_from_pdf
-from seed import seed_attributes, get_or_create_attribute
+from seed import seed_attributes, get_or_create_attribute, seed_packages
+from migration import migrate_schema
 
 # ── Ensure upload directory exists ───────────────────────────────────────────
 BASE_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads", "resumes")
 os.makedirs(BASE_UPLOAD_DIR, exist_ok=True)
 
-# ── Create / sync all tables ─────────────────────────────────────────────────
-models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="InterviewAI API", version="2.0")
+
+# ── Lifespan event handler (Startup/Shutdown) ─────────────────────────────────
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Database Initialization ──────────────────────────────────────────────
+    try:
+        migrate_schema(engine)
+        models.Base.metadata.create_all(bind=engine)
+        db = next(get_db())
+        try:
+            seed_attributes(db)
+            seed_packages(db)
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"❌ Error during database initialization: {e}")
+    yield
+
+app = FastAPI(title="InterviewAI API", version="2.0", lifespan=lifespan)
 
 # ── CORS Middleware ───────────────────────────────────────────────────────────
 app.add_middleware(
@@ -40,16 +61,6 @@ app.add_middleware(
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 token_blacklist: set = set()
-
-
-# ── Seed attributes on startup ───────────────────────────────────────────────
-@app.on_event("startup")
-def on_startup():
-    db = next(get_db())
-    try:
-        seed_attributes(db)
-    finally:
-        db.close()
 
 
 # ════════════════════════════════════════════════════
@@ -73,8 +84,8 @@ def get_current_user(
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.is_approved == 0:
-        raise HTTPException(status_code=403, detail="Your account is not approved yet")
+    if user.is_valid == 0:
+        raise HTTPException(status_code=403, detail="Your account is not valid yet")
     return user
 
 
@@ -99,7 +110,7 @@ def register(payload: schemas.RegisterRequest, db: Session = Depends(get_db)):
         email=str(payload.email),
         phone=payload.phone,
         password=auth.hash_password(payload.password),
-        is_approved=1
+        is_valid=1
     )
     db.add(user)
     db.commit()
@@ -117,8 +128,8 @@ def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.username == payload.username).first()
     if not user or not auth.verify_password(payload.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    if user.is_approved == 0:
-        raise HTTPException(status_code=403, detail="Your account is not approved yet")
+    if user.is_valid == 0:
+        raise HTTPException(status_code=403, detail="Your account is not valid yet")
 
     token = auth.create_access_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
@@ -201,41 +212,21 @@ async def upload_resume(
     with open(file_path, "wb") as f:
         f.write(file_bytes)
 
-    # ── Extract profile photo ─────────────────────────────────────────────────
+    # ── Extract and store profile photo ───────────────────────────────────────
     user_image_b64 = extract_image_from_pdf(file_bytes)
+    if user_image_b64:
+        current_user.pic = user_image_b64
+    else:
+        # User requested: "else make it null" if not found in resume
+        current_user.pic = None
 
     # ── Clear old profile entries so we only keep data from the new resume ──────
     db.query(models.UserProfile).filter(
         models.UserProfile.user_id == current_user.id
     ).delete(synchronize_session=False)
 
-    # ── Store each parsed section into user_profile ───────────────────────────
-    for code, value in sections.items():
-        if not value:
-            continue
-        attr = get_or_create_attribute(db, code)
-        db.add(models.UserProfile(
-            user_id         = current_user.id,
-            attribute_id    = attr.id,
-            attribute_value = value,
-            resume_path     = file_path,
-            user_image      = user_image_b64 if user_image_b64 else None
-        ))
+    db.commit() # Commit image change and profile deletion
 
-    # ── If no sections were parsed, still create at least one profile row ──────
-    # so that resume_path & user_image are persisted even for sparse resumes.
-    if not sections:
-        # Use a generic placeholder attribute
-        placeholder_attr = get_or_create_attribute(db, "resume_uploaded", "Resume Uploaded", "text")
-        db.add(models.UserProfile(
-            user_id         = current_user.id,
-            attribute_id    = placeholder_attr.id,
-            attribute_value = "true",
-            resume_path     = file_path,
-            user_image      = user_image_b64 if user_image_b64 else None
-        ))
-
-    db.commit()
 
     #return _build_profile_response(current_user, db)# return _build_profile_response(current_user, db)  # ✅ commented
 
@@ -245,9 +236,9 @@ async def upload_resume(
     ).all()
     for old in old_records:
         # Remove old file from disk if it exists
-        if old.file_path and os.path.exists(old.file_path):
+        if old.path and os.path.exists(old.path):
             try:
-                os.remove(old.file_path)
+                os.remove(old.path)
             except Exception:
                 pass  # If file deletion fails, still proceed
         db.delete(old)
@@ -257,13 +248,37 @@ async def upload_resume(
     skills_str = sections.get("technical_skills", "") or ""
     resume_record = models.Resume(
         user_id     = current_user.id,
-        resume_name = file.filename,          # original name (duplicate names allowed)
-        file_path   = file_path,
-        file_size   = file_size,
+        resume_name = file.filename,
+        path        = file_path,
+        size        = file_size,
         mime_type   = "application/pdf",
         skills      = skills_str or None,
+        domain      = parsed.get("domain")
     )
     db.add(resume_record)
+    db.flush() # Get resume_id
+
+    # ── Store each parsed section into user_profile ───────────────────────────
+    for code, value in sections.items():
+        if not value:
+            continue
+        attr = get_or_create_attribute(db, code)
+        db.add(models.UserProfile(
+            user_id      = current_user.id,
+            resume_id    = resume_record.id,
+            attribute_id = attr.id,
+            values       = value
+        ))
+
+    if not sections:
+        placeholder_attr = get_or_create_attribute(db, "resume_uploaded", "Resume Uploaded", "text")
+        db.add(models.UserProfile(
+            user_id      = current_user.id,
+            resume_id    = resume_record.id,
+            attribute_id = placeholder_attr.id,
+            values       = "true"
+        ))
+
     db.commit()
     db.refresh(resume_record)
 
@@ -287,7 +302,7 @@ def list_resumes(
     # Strictly filter by the authenticated user's ID — no other user's data is returned
     records = db.query(models.Resume).filter(
         models.Resume.user_id == current_user.id
-    ).order_by(models.Resume.uploaded_date.desc()).all()
+    ).order_by(models.Resume.updated_at.desc()).all()
 
     return {
         "success":      True,
@@ -309,10 +324,10 @@ def view_resume(
     db: Session = Depends(get_db)
 ):
     record = _get_resume_or_404(resume_id, current_user.id, db)
-    if not os.path.exists(record.file_path):
+    if not os.path.exists(record.path):
         raise HTTPException(status_code=404, detail="Resume file not found on server")
     return FileResponse(
-        path       = record.file_path,
+        path       = record.path,
         media_type = "application/pdf",
         filename   = record.resume_name,
         headers    = {"Content-Disposition": f"inline; filename=\"{record.resume_name}\""}
@@ -330,10 +345,10 @@ def download_resume(
     db: Session = Depends(get_db)
 ):
     record = _get_resume_or_404(resume_id, current_user.id, db)
-    if not os.path.exists(record.file_path):
+    if not os.path.exists(record.path):
         raise HTTPException(status_code=404, detail="Resume file not found on server")
     return FileResponse(
-        path       = record.file_path,
+        path       = record.path,
         media_type = "application/pdf",
         filename   = record.resume_name,
         headers    = {"Content-Disposition": f"attachment; filename=\"{record.resume_name}\""}
@@ -353,8 +368,8 @@ def delete_resume(
     record = _get_resume_or_404(resume_id, current_user.id, db)
 
     # Remove file from disk
-    if os.path.exists(record.file_path):
-        os.remove(record.file_path)
+    if os.path.exists(record.path):
+        os.remove(record.path)
 
     db.delete(record)
     db.commit()
@@ -455,12 +470,7 @@ def update_user_profile(
     db.commit()
     db.refresh(current_user)
 
-    # ── Read back stored image path (if any) ─────────────────────────────────
-    img_row    = db.query(models.UserProfile).filter(
-        models.UserProfile.user_id    == current_user.id,
-        models.UserProfile.user_image.isnot(None)
-    ).first()
-    image_path = img_row.user_image if img_row else None
+    image_path = current_user.pic
 
     # ── Build response ────────────────────────────────────────────────────────
     stored_parts = (current_user.name or "").split(" ", 1)
@@ -477,7 +487,7 @@ def update_user_profile(
             "last_name":  resp_last,
             "email":      current_user.email,
             "phone":      current_user.phone,
-            "user_image": image_path,
+            "user_image": current_user.pic,
         }
     }
 
@@ -499,8 +509,7 @@ async def update_profile_image(
     Upload a new profile avatar.
 
     - Saves the file under **uploads/profile_images/{user_id}/**.
-    - Stores the local file **path** in `user_profile.user_image`.
-    - Creates a placeholder row if the user has no profile rows yet.
+    - Stores the local file **path** in `users.pic`.
     """
 
     allowed_types = {"image/jpeg", "image/png", "image/gif", "image/webp"}
@@ -523,23 +532,8 @@ async def update_profile_image(
     with open(image_path, "wb") as img_file:
         img_file.write(img_bytes)
 
-    # ── Store path in user_profile.user_image ─────────────────────────────────
-    profile_rows = db.query(models.UserProfile).filter(
-        models.UserProfile.user_id == current_user.id
-    ).all()
-
-    if profile_rows:
-        for row in profile_rows:
-            row.user_image = image_path
-    else:
-        placeholder_attr = get_or_create_attribute(db, "profile_image", "Profile Image", "text")
-        db.add(models.UserProfile(
-            user_id         = current_user.id,
-            attribute_id    = placeholder_attr.id,
-            attribute_value = "uploaded",
-            user_image      = image_path,
-        ))
-
+    # ── Store path in users.pic ───────────────────────────────────────────────
+    current_user.pic = image_path
     db.commit()
 
     return {
@@ -579,12 +573,12 @@ def update_profile(
     ).first()
 
     if existing:
-        existing.attribute_value = payload.attribute_value
+        existing.values = payload.values
     else:
         db.add(models.UserProfile(
             user_id      = current_user.id,
             attribute_id = attr.id,
-            attribute_value = payload.attribute_value
+            values       = payload.values
         ))
 
     db.commit()
@@ -612,38 +606,40 @@ def delete_user(
 ):
     db.delete(current_user)
     db.commit()
-    return {"message": f"User '{current_user.username}' and all profile data deleted successfully"}
+    return {"success": True, "message": "User account and all data deleted successfully"}
 
 
 # ════════════════════════════════════════════════════
-# 14. CHANGE PASSWORD
-# FIX: New password must differ from old password.
+# 14. SUBSCRIPTIONS & PAYMENTS
 # ════════════════════════════════════════════════════
 
-@app.post("/change-password", summary="Change user password")
-def change_password(
-    payload: schemas.ChangePasswordRequest,
+@app.get("/packages", response_model=List[schemas.PackageResponse],
+         summary="List all available subscription packages")
+def list_packages(db: Session = Depends(get_db)):
+    return db.query(models.Package).all()
+
+
+@app.get("/subscription", response_model=Optional[schemas.SubscriptionResponse],
+         summary="Get current user subscription")
+def get_subscription(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # 1. Verify old password is correct
-    if not auth.verify_password(payload.old_password, current_user.password):
-        raise HTTPException(status_code=400, detail="Incorrect old password")
+    return db.query(models.Subscription).filter(
+        models.Subscription.user_id == current_user.id,
+        models.Subscription.status == "active"
+    ).first()
 
-    # 2. New and confirm passwords must match
-    if payload.new_password != payload.confirm_password:
-        raise HTTPException(status_code=400, detail="New passwords do not match")
 
-    # 3. New password must NOT be the same as old password
-    if auth.verify_password(payload.new_password, current_user.password):
-        raise HTTPException(
-            status_code=400,
-            detail="New password must be different from your current password"
-        )
-
-    current_user.password = auth.hash_password(payload.new_password)
-    db.commit()
-    return {"message": "Password updated successfully", "success": True}
+@app.get("/payments", response_model=List[schemas.PaymentResponse],
+         summary="Get current user payment history")
+def get_payments(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return db.query(models.Payment).filter(
+        models.Payment.user_id == current_user.id
+    ).all()
 
 
 # ════════════════════════════════════════════════════
@@ -667,19 +663,19 @@ def _build_resume_data(record: models.Resume) -> dict:
         raw_skills = [s.strip() for s in record.skills.split(",") if s.strip()]
         skills_list = [
             s for s in raw_skills
-            if not (s.isupper() and len(s.split()) <= 3)  # drop section headers e.g. "STRENGTHS", "SKILLS"
-            and "(cid:" not in s                           # drop PDF bullet glyph entries e.g. "(cid:127) Strong Analytical..."
+            if not (s.isupper() and len(s.split()) <= 3)  # drop section headers
+            and "(cid:" not in s
         ]
 
-    # Format date as "April 22, 2026" — DB stores full datetime, response shows date only
-    formatted_date = record.uploaded_date.strftime("%B %d, %Y")
+    formatted_date = record.updated_at.strftime("%B %d, %Y")
 
     return {
         "resume_id":       record.id,
         "resume_name":     record.resume_name,
-        "size":            _format_size(record.file_size),
-        "uploaded_date":   formatted_date,
+        "size":            _format_size(record.size),
+        "updated_at":      formatted_date,
         "skills":          skills_list,
+        "domain":          record.domain,
         "view_resume":     f"/resume/{record.id}/view",
         "download_resume": f"/resume/{record.id}/download",
         "delete_resume":   f"/resume/{record.id}",
@@ -715,640 +711,46 @@ def _build_profile_response(user: models.User, db: Session) -> dict:
             profile_items.append({
                 "attribute_code":  attr.code,
                 "attribute_name":  attr.name,
-                "attribute_value": entry.attribute_value
+                "values":          entry.values
             })
 
-    # Get resume_path and user_image from the first profile entry that has them
-    resume_path = None
-    user_image = None
-    for entry in entries:
-        if not resume_path and entry.resume_path:
-            resume_path = entry.resume_path
-        if not user_image and entry.user_image:
-            user_image = entry.user_image
+    last_resume = db.query(models.Resume).filter(
+        models.Resume.user_id == user.id
+    ).order_by(models.Resume.updated_at.desc()).first()
 
     return {
         "user_id":     user.id,
         "username":    user.username,
         "name":        user.name,
         "email":       user.email,
-        "resume_path": resume_path,
-        "user_image":  user_image,
+        "resume_path": last_resume.path if last_resume else None,
+        "user_image":  user.pic,
         "profile":     profile_items
     }
-# from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
-# from fastapi.security import OAuth2PasswordBearer
-# from sqlalchemy.orm import Session
-# from jose import JWTError
 
-# import models, schemas, auth
-# from database import engine, get_db
-# from resume_parser import parse_resume, detect_dynamic_sections, STANDARD_ATTRIBUTES
-# from seed import seed_attributes, get_or_create_attribute
 
-# # ── Create all tables ────────────────────────────────────────────────────────
-# models.Base.metadata.create_all(bind=engine)
-
-# app = FastAPI(title="InterviewAI API", version="2.0")
-# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
-# token_blacklist = set()
-
-
-# # ── Seed attributes on startup ───────────────────────────────────────────────
-# @app.on_event("startup")
-# def on_startup():
-#     db = next(get_db())
-#     try:
-#         seed_attributes(db)
-#     finally:
-#         db.close()
-
-
-# # ════════════════════════════════════════════════════
-# # AUTH DEPENDENCY
-# # ════════════════════════════════════════════════════
-
-# def get_current_user(
-#     token: str = Depends(oauth2_scheme),
-#     db: Session = Depends(get_db)
-# ):
-#     if token in token_blacklist:
-#         raise HTTPException(status_code=401, detail="Token has been logged out. Please login again.")
-#     try:
-#         payload = auth.decode_token(token)
-#         username = payload.get("sub")
-#         if not username:
-#             raise HTTPException(status_code=401, detail="Invalid token")
-#     except JWTError:
-#         raise HTTPException(status_code=401, detail="Token invalid or expired")
-
-#     user = db.query(models.User).filter(models.User.username == username).first()
-#     if not user:
-#         raise HTTPException(status_code=404, detail="User not found")
-#     if user.is_approved == 0:
-#         raise HTTPException(status_code=403, detail="Your account is not approved yet")
-#     return user
-
-
-# # ════════════════════════════════════════════════════
-# # 1. REGISTER
-# # ════════════════════════════════════════════════════
-
-# @app.post("/register", response_model=schemas.UserResponse, status_code=201,
-#           summary="Register a new user")
-# def register(payload: schemas.RegisterRequest, db: Session = Depends(get_db)):
-#     # Check duplicate username
-#     if db.query(models.User).filter(models.User.username == payload.username).first():
-#         raise HTTPException(status_code=400, detail="Username already taken")
-
-#     # Check duplicate email
-#     if db.query(models.User).filter(models.User.email == payload.email).first():
-#         raise HTTPException(status_code=400, detail="Email already registered")
-
-#     # Check passwords match
-#     if payload.password != payload.confirm_password:
-#         raise HTTPException(status_code=400, detail="Passwords do not match")
-
-#     user = models.User(
-#         username=payload.username,
-#         name=payload.name,
-#         email=str(payload.email),
-#         phone=payload.phone,
-#         password=auth.hash_password(payload.password),
-#         is_approved=1  # auto-approved
-#     )
-#     db.add(user)
-#     db.commit()
-#     db.refresh(user)
-#     return user
-
-
-# # ════════════════════════════════════════════════════
-# # 2. LOGIN
-# # ════════════════════════════════════════════════════
-
-# @app.post("/login", response_model=schemas.TokenResponse,
-#           summary="Login with username and password")
-# def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
-#     user = db.query(models.User).filter(models.User.username == payload.username).first()
-#     if not user or not auth.verify_password(payload.password, user.password):
-#         raise HTTPException(status_code=401, detail="Invalid username or password")
-#     if user.is_approved == 0:
-#         raise HTTPException(status_code=403, detail="Your account is not approved yet")
-
-#     token = auth.create_access_token({"sub": user.username})
-#     return {"access_token": token, "token_type": "bearer"}
-
-
-# # ════════════════════════════════════════════════════
-# # 3. LOGOUT
-# # ════════════════════════════════════════════════════
-
-# @app.post("/logout", summary="Logout and invalidate token")
-# def logout(token: str = Depends(oauth2_scheme)):
-#     token_blacklist.add(token)
-#     return {"message": "Successfully logged out"}
-
-
-# # ════════════════════════════════════════════════════
-# # 4. GET CURRENT USER
-# # ════════════════════════════════════════════════════
-
-# @app.get("/me", response_model=schemas.UserResponse,
-#          summary="Get logged in user details")
-# def get_me(current_user: models.User = Depends(get_current_user)):
-#     return current_user
-
-
-# # ════════════════════════════════════════════════════
-# # 5. UPLOAD RESUME
-# # ════════════════════════════════════════════════════
-
-# @app.post("/upload-resume", response_model=schemas.UserProfileResponse,
-#           summary="Upload PDF resume — auto extracts and stores all sections")
-# async def upload_resume(
-#     file: UploadFile = File(...),
-#     current_user: models.User = Depends(get_current_user),
-#     db: Session = Depends(get_db)
-# ):
-#     # Validate PDF
-#     if not file.filename.lower().endswith(".pdf"):
-#         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-
-#     file_bytes = await file.read()
-#     if len(file_bytes) > 5 * 1024 * 1024:
-#         raise HTTPException(status_code=400, detail="File size must be less than 5MB")
-
-#     try:
-#         parsed = parse_resume(file_bytes)
-#     except Exception as e:
-#         print(f"PARSE ERROR: {e}")
-#         raise HTTPException(status_code=500, detail=f"Resume parsing failed: {str(e)}")
-
-#     personal = parsed["personal"]
-#     sections = parsed["sections"]
-#     raw_text = parsed["raw_text"]
-
-#     # ── Update user's name/email/phone from resume if extracted ─────────────
-#     if personal.get("name"):
-#         current_user.name = personal["name"][:30]
-#     if personal.get("email") and personal["email"] != current_user.email:
-#         current_user.email = personal["email"][:30]
-#     if personal.get("phone"):
-#         current_user.phone = personal["phone"][:20]
-#     db.commit()
-
-#     # ── Detect dynamic sections not in standard list ─────────────────────────
-#     known_codes = [a["code"] for a in STANDARD_ATTRIBUTES]
-#     dynamic_attrs = detect_dynamic_sections(raw_text, known_codes)
-#     for dattr in dynamic_attrs:
-#         get_or_create_attribute(db, dattr["code"], dattr["name"], dattr["type"])
-
-#     # ── Store each section into user_profile ─────────────────────────────────
-#     for code, value in sections.items():
-#         if not value:
-#             continue
-
-#         attr = get_or_create_attribute(db, code)
-
-#         # Check if this user_profile entry already exists
-#         existing = db.query(models.UserProfile).filter(
-#             models.UserProfile.user_id == current_user.id,
-#             models.UserProfile.attribute_id == attr.id
-#         ).first()
-
-#         if existing:
-#             existing.attribute_value = value
-#         else:
-#             db.add(models.UserProfile(
-#                 user_id=current_user.id,
-#                 attribute_id=attr.id,
-#                 attribute_value=value
-#             ))
-
-#     db.commit()
-
-#     # ── Return full profile ──────────────────────────────────────────────────
-#     return _build_profile_response(current_user, db)
-
-
-# # ════════════════════════════════════════════════════
-# # 6. GET PROFILE
-# # ════════════════════════════════════════════════════
-
-# @app.get("/profile", response_model=schemas.UserProfileResponse,
-#          summary="Get full user profile with all resume sections")
-# def get_profile(
-#     current_user: models.User = Depends(get_current_user),
-#     db: Session = Depends(get_db)
-# ):
-#     profile_entries = db.query(models.UserProfile).filter(
-#         models.UserProfile.user_id == current_user.id
-#     ).all()
-
-#     if not profile_entries:
-#         raise HTTPException(
-#             status_code=404,
-#             detail="Profile not found. Please upload your resume first."
-#         )
-
-#     return _build_profile_response(current_user, db)
-
-
-# # ════════════════════════════════════════════════════
-# # 7. UPDATE PROFILE FIELD
-# # ════════════════════════════════════════════════════
-
-# @app.put("/profile", response_model=schemas.UserProfileResponse,
-#          summary="Update a specific profile field by attribute code")
-# def update_profile(
-#     payload: schemas.UpdateProfileRequest,
-#     current_user: models.User = Depends(get_current_user),
-#     db: Session = Depends(get_db)
-# ):
-#     attr = db.query(models.Attribute).filter(
-#         models.Attribute.code == payload.attribute_code
-#     ).first()
-
-#     if not attr:
-#         raise HTTPException(status_code=404, detail=f"Attribute '{payload.attribute_code}' not found")
-
-#     existing = db.query(models.UserProfile).filter(
-#         models.UserProfile.user_id == current_user.id,
-#         models.UserProfile.attribute_id == attr.id
-#     ).first()
-
-#     if existing:
-#         existing.attribute_value = payload.attribute_value
-#     else:
-#         db.add(models.UserProfile(
-#             user_id=current_user.id,
-#             attribute_id=attr.id,
-#             attribute_value=payload.attribute_value
-#         ))
-
-#     db.commit()
-#     return _build_profile_response(current_user, db)
-
-
-# # ════════════════════════════════════════════════════
-# # 8. LIST ALL ATTRIBUTES
-# # ════════════════════════════════════════════════════
-
-# @app.get("/attributes", response_model=list[schemas.AttributeResponse],
-#          summary="List all available resume attributes/sections")
-# def list_attributes(db: Session = Depends(get_db)):
-#     return db.query(models.Attribute).all()
-
-
-# # ════════════════════════════════════════════════════
-# # 9. DELETE USER (cascades to profile)
-# # ════════════════════════════════════════════════════
-
-# @app.delete("/user", summary="Delete current user and all profile data")
-# def delete_user(
-#     current_user: models.User = Depends(get_current_user),
-#     db: Session = Depends(get_db)
-# ):
-#     db.delete(current_user)
-#     db.commit()
-#     return {"message": f"User '{current_user.username}' and all profile data deleted successfully"}
-
-
-# # ════════════════════════════════════════════════════
-# # HELPER
-# # ════════════════════════════════════════════════════
-
-# def _build_profile_response(user: models.User, db: Session) -> dict:
-#     """Build the full profile response with all attribute sections"""
-#     entries = db.query(models.UserProfile).filter(
-#         models.UserProfile.user_id == user.id
-#     ).all()
-
-#     profile_items = []
-#     for entry in entries:
-#         attr = db.query(models.Attribute).filter(
-#             models.Attribute.id == entry.attribute_id
-#         ).first()
-#         if attr:
-#             profile_items.append({
-#                 "attribute_code": attr.code,
-#                 "attribute_name": attr.name,
-#                 "attribute_value": entry.attribute_value
-#             })
-
-#     return {
-#         "user_id": user.id,
-#         "username": user.username,
-#         "name": user.name,
-#         "email": user.email,
-#         "profile": profile_items
-#     }
-# # from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
-# # from fastapi.security import OAuth2PasswordBearer
-# # from sqlalchemy.orm import Session
-# # from jose import JWTError
-
-# # import models, schemas, auth
-# # from database import engine, get_db
-# # from resume_parser import parse_resume, detect_dynamic_sections, STANDARD_ATTRIBUTES
-# # from seed import seed_attributes, get_or_create_attribute
-
-# # # ── Create all tables ────────────────────────────────────────────────────────
-# # models.Base.metadata.create_all(bind=engine)
-
-# # app = FastAPI(title="InterviewAI API", version="2.0")
-# # oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
-# # token_blacklist = set()
-
-
-# # # ── Seed attributes on startup ───────────────────────────────────────────────
-# # @app.on_event("startup")
-# # def on_startup():
-# #     db = next(get_db())
-# #     try:
-# #         seed_attributes(db)
-# #     finally:
-# #         db.close()
-
-
-# # # ════════════════════════════════════════════════════
-# # # AUTH DEPENDENCY
-# # # ════════════════════════════════════════════════════
-
-# # def get_current_user(
-# #     token: str = Depends(oauth2_scheme),
-# #     db: Session = Depends(get_db)
-# # ):
-# #     if token in token_blacklist:
-# #         raise HTTPException(status_code=401, detail="Token has been logged out. Please login again.")
-# #     try:
-# #         payload = auth.decode_token(token)
-# #         username = payload.get("sub")
-# #         if not username:
-# #             raise HTTPException(status_code=401, detail="Invalid token")
-# #     except JWTError:
-# #         raise HTTPException(status_code=401, detail="Token invalid or expired")
-
-# #     user = db.query(models.User).filter(models.User.username == username).first()
-# #     if not user:
-# #         raise HTTPException(status_code=404, detail="User not found")
-# #     if user.is_approved == '0':
-# #         raise HTTPException(status_code=403, detail="Your account is not approved yet")
-# #     return user
-
-
-# # # ════════════════════════════════════════════════════
-# # # 1. REGISTER
-# # # ════════════════════════════════════════════════════
-
-# # @app.post("/register", response_model=schemas.UserResponse, status_code=201,
-# #           summary="Register a new user")
-# # def register(payload: schemas.RegisterRequest, db: Session = Depends(get_db)):
-# #     # Check duplicate username
-# #     if db.query(models.User).filter(models.User.username == payload.username).first():
-# #         raise HTTPException(status_code=400, detail="Username already taken")
-
-# #     # Check duplicate email
-# #     if db.query(models.User).filter(models.User.email == payload.email).first():
-# #         raise HTTPException(status_code=400, detail="Email already registered")
-
-# #     # Check passwords match
-# #     if payload.password != payload.confirm_password:
-# #         raise HTTPException(status_code=400, detail="Passwords do not match")
-
-# #     user = models.User(
-# #         username=payload.username,
-# #         name=payload.name,
-# #         email=str(payload.email),
-# #         phone=payload.phone,
-# #         password=auth.hash_password(payload.password),
-# #         is_approved='1'  # auto-approved
-# #     )
-# #     db.add(user)
-# #     db.commit()
-# #     db.refresh(user)
-# #     return user
-
-
-# # # ════════════════════════════════════════════════════
-# # # 2. LOGIN
-# # # ════════════════════════════════════════════════════
-
-# # @app.post("/login", response_model=schemas.TokenResponse,
-# #           summary="Login with username and password")
-# # def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
-# #     user = db.query(models.User).filter(models.User.username == payload.username).first()
-# #     if not user or not auth.verify_password(payload.password, user.password):
-# #         raise HTTPException(status_code=401, detail="Invalid username or password")
-# #     if user.is_approved == '0':
-# #         raise HTTPException(status_code=403, detail="Your account is not approved yet")
-
-# #     token = auth.create_access_token({"sub": user.username})
-# #     return {"access_token": token, "token_type": "bearer"}
-
-
-# # # ════════════════════════════════════════════════════
-# # # 3. LOGOUT
-# # # ════════════════════════════════════════════════════
-
-# # @app.post("/logout", summary="Logout and invalidate token")
-# # def logout(token: str = Depends(oauth2_scheme)):
-# #     token_blacklist.add(token)
-# #     return {"message": "Successfully logged out"}
-
-
-# # # ════════════════════════════════════════════════════
-# # # 4. GET CURRENT USER
-# # # ════════════════════════════════════════════════════
-
-# # @app.get("/me", response_model=schemas.UserResponse,
-# #          summary="Get logged in user details")
-# # def get_me(current_user: models.User = Depends(get_current_user)):
-# #     return current_user
-
-
-# # # ════════════════════════════════════════════════════
-# # # 5. UPLOAD RESUME
-# # # ════════════════════════════════════════════════════
-
-# # @app.post("/upload-resume", response_model=schemas.UserProfileResponse,
-# #           summary="Upload PDF resume — auto extracts and stores all sections")
-# # async def upload_resume(
-# #     file: UploadFile = File(...),
-# #     current_user: models.User = Depends(get_current_user),
-# #     db: Session = Depends(get_db)
-# # ):
-# #     # Validate PDF
-# #     if not file.filename.lower().endswith(".pdf"):
-# #         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-
-# #     file_bytes = await file.read()
-# #     if len(file_bytes) > 5 * 1024 * 1024:
-# #         raise HTTPException(status_code=400, detail="File size must be less than 5MB")
-
-# #     try:
-# #         parsed = parse_resume(file_bytes)
-# #     except Exception as e:
-# #         print(f"PARSE ERROR: {e}")
-# #         raise HTTPException(status_code=500, detail=f"Resume parsing failed: {str(e)}")
-
-# #     personal = parsed["personal"]
-# #     sections = parsed["sections"]
-# #     raw_text = parsed["raw_text"]
-
-# #     # ── Update user's name/email/phone from resume if extracted ─────────────
-# #     if personal.get("name"):
-# #         current_user.name = personal["name"][:30]
-# #     if personal.get("email") and personal["email"] != current_user.email:
-# #         current_user.email = personal["email"][:30]
-# #     if personal.get("phone"):
-# #         current_user.phone = personal["phone"][:20]
-# #     db.commit()
-
-# #     # ── Detect dynamic sections not in standard list ─────────────────────────
-# #     known_codes = [a["code"] for a in STANDARD_ATTRIBUTES]
-# #     dynamic_attrs = detect_dynamic_sections(raw_text, known_codes)
-# #     for dattr in dynamic_attrs:
-# #         get_or_create_attribute(db, dattr["code"], dattr["name"], dattr["type"])
-
-# #     # ── Store each section into user_profile ─────────────────────────────────
-# #     for code, value in sections.items():
-# #         if not value:
-# #             continue
-
-# #         attr = get_or_create_attribute(db, code)
-
-# #         # Check if this user_profile entry already exists
-# #         existing = db.query(models.UserProfile).filter(
-# #             models.UserProfile.user_id == current_user.id,
-# #             models.UserProfile.attribute_id == attr.id
-# #         ).first()
-
-# #         if existing:
-# #             existing.attribute_value = value
-# #         else:
-# #             db.add(models.UserProfile(
-# #                 user_id=current_user.id,
-# #                 attribute_id=attr.id,
-# #                 attribute_value=value
-# #             ))
-
-# #     db.commit()
-
-# #     # ── Return full profile ──────────────────────────────────────────────────
-# #     return _build_profile_response(current_user, db)
-
-
-# # # ════════════════════════════════════════════════════
-# # # 6. GET PROFILE
-# # # ════════════════════════════════════════════════════
-
-# # @app.get("/profile", response_model=schemas.UserProfileResponse,
-# #          summary="Get full user profile with all resume sections")
-# # def get_profile(
-# #     current_user: models.User = Depends(get_current_user),
-# #     db: Session = Depends(get_db)
-# # ):
-# #     profile_entries = db.query(models.UserProfile).filter(
-# #         models.UserProfile.user_id == current_user.id
-# #     ).all()
-
-# #     if not profile_entries:
-# #         raise HTTPException(
-# #             status_code=404,
-# #             detail="Profile not found. Please upload your resume first."
-# #         )
-
-# #     return _build_profile_response(current_user, db)
-
-
-# # # ════════════════════════════════════════════════════
-# # # 7. UPDATE PROFILE FIELD
-# # # ════════════════════════════════════════════════════
-
-# # @app.put("/profile", response_model=schemas.UserProfileResponse,
-# #          summary="Update a specific profile field by attribute code")
-# # def update_profile(
-# #     payload: schemas.UpdateProfileRequest,
-# #     current_user: models.User = Depends(get_current_user),
-# #     db: Session = Depends(get_db)
-# # ):
-# #     attr = db.query(models.Attribute).filter(
-# #         models.Attribute.code == payload.attribute_code
-# #     ).first()
-
-# #     if not attr:
-# #         raise HTTPException(status_code=404, detail=f"Attribute '{payload.attribute_code}' not found")
-
-# #     existing = db.query(models.UserProfile).filter(
-# #         models.UserProfile.user_id == current_user.id,
-# #         models.UserProfile.attribute_id == attr.id
-# #     ).first()
-
-# #     if existing:
-# #         existing.attribute_value = payload.attribute_value
-# #     else:
-# #         db.add(models.UserProfile(
-# #             user_id=current_user.id,
-# #             attribute_id=attr.id,
-# #             attribute_value=payload.attribute_value
-# #         ))
-
-# #     db.commit()
-# #     return _build_profile_response(current_user, db)
-
-
-# # # ════════════════════════════════════════════════════
-# # # 8. LIST ALL ATTRIBUTES
-# # # ════════════════════════════════════════════════════
-
-# # @app.get("/attributes", response_model=list[schemas.AttributeResponse],
-# #          summary="List all available resume attributes/sections")
-# # def list_attributes(db: Session = Depends(get_db)):
-# #     return db.query(models.Attribute).all()
-
-
-# # # ════════════════════════════════════════════════════
-# # # 9. DELETE USER (cascades to profile)
-# # # ════════════════════════════════════════════════════
-
-# # @app.delete("/user", summary="Delete current user and all profile data")
-# # def delete_user(
-# #     current_user: models.User = Depends(get_current_user),
-# #     db: Session = Depends(get_db)
-# # ):
-# #     db.delete(current_user)
-# #     db.commit()
-# #     return {"message": f"User '{current_user.username}' and all profile data deleted successfully"}
-
-
-# # # ════════════════════════════════════════════════════
-# # # HELPER
-# # # ════════════════════════════════════════════════════
-
-# # def _build_profile_response(user: models.User, db: Session) -> dict:
-# #     """Build the full profile response with all attribute sections"""
-# #     entries = db.query(models.UserProfile).filter(
-# #         models.UserProfile.user_id == user.id
-# #     ).all()
-
-# #     profile_items = []
-# #     for entry in entries:
-# #         attr = db.query(models.Attribute).filter(
-# #             models.Attribute.id == entry.attribute_id
-# #         ).first()
-# #         if attr:
-# #             profile_items.append({
-# #                 "attribute_code": attr.code,
-# #                 "attribute_name": attr.name,
-# #                 "attribute_value": entry.attribute_value
-# #             })
-
-# #     return {
-# #         "user_id": user.id,
-# #         "username": user.username,
-# #         "name": user.name,
-# #         "email": user.email,
-# #         "profile": profile_items
-# #     }
+# ════════════════════════════════════════════════════
+# 15. CHANGE PASSWORD
+# ════════════════════════════════════════════════════
+
+@app.post("/change-password", summary="Change user password")
+def change_password(
+    payload: schemas.ChangePasswordRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not auth.verify_password(payload.old_password, current_user.password):
+        raise HTTPException(status_code=400, detail="Incorrect old password")
+
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="New passwords do not match")
+
+    if auth.verify_password(payload.new_password, current_user.password):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from your current password"
+        )
+
+    current_user.password = auth.hash_password(payload.new_password)
+    db.commit()
+    return {"message": "Password updated successfully", "success": True}
