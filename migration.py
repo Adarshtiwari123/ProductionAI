@@ -43,11 +43,32 @@ def migrate_schema(engine):
 
         # 3. Update 'user_profile' table
         try:
-            # Check if attribute_value exists and rename to values
+            # Check if attribute_value exists and rename to value
             res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='user_profile' AND column_name='attribute_value'")).fetchone()
             if res:
-                print("🔹 Renaming 'attribute_value' -> 'values' in 'user_profile' table...")
-                conn.execute(text("ALTER TABLE user_profile RENAME COLUMN attribute_value TO \"values\""))
+                print("🔹 Renaming 'attribute_value' -> 'value' in 'user_profile' table...")
+                conn.execute(text("ALTER TABLE user_profile RENAME COLUMN attribute_value TO \"value\""))
+                conn.commit()
+
+            # Check if values exists and rename to value
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='user_profile' AND column_name='values'")).fetchone()
+            if res:
+                print("🔹 Renaming 'values' -> 'value' in 'user_profile' table...")
+                conn.execute(text("ALTER TABLE user_profile RENAME COLUMN \"values\" TO \"value\""))
+                conn.commit()
+
+            # Drop user_image if exists
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='user_profile' AND column_name='user_image'")).fetchone()
+            if res:
+                print("🔹 Dropping 'user_image' from 'user_profile' table...")
+                conn.execute(text("ALTER TABLE user_profile DROP COLUMN user_image"))
+                conn.commit()
+
+            # Drop resume_path if exists
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='user_profile' AND column_name='resume_path'")).fetchone()
+            if res:
+                print("🔹 Dropping 'resume_path' from 'user_profile' table...")
+                conn.execute(text("ALTER TABLE user_profile DROP COLUMN resume_path"))
                 conn.commit()
 
             # Add resume_id FK if missing
@@ -81,6 +102,20 @@ def migrate_schema(engine):
                     print(f"🔹 Renaming '{old}' -> '{new}' in 'resumes' table...")
                     conn.execute(text(f"ALTER TABLE resumes RENAME COLUMN {old} TO {new}"))
                     conn.commit()
+
+            # Add domain if missing
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='resumes' AND column_name='domain'")).fetchone()
+            if not res:
+                print("🔹 Adding 'domain' to 'resumes' table...")
+                conn.execute(text("ALTER TABLE resumes ADD COLUMN domain VARCHAR(100)"))
+                conn.commit()
+
+            # Add created_at if missing
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='resumes' AND column_name='created_at'")).fetchone()
+            if not res:
+                print("🔹 Adding 'created_at' to 'resumes' table...")
+                conn.execute(text("ALTER TABLE resumes ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+                conn.commit()
         except Exception as e:
             print(f"⚠️ 'resumes' migration note: {e}")
 

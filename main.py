@@ -281,7 +281,7 @@ async def upload_resume(
             user_id      = current_user.id,
             resume_id    = resume_record.id,
             attribute_id = attr.id,
-            values       = value
+            value        = value
         ))
 
     if not sections:
@@ -290,7 +290,7 @@ async def upload_resume(
             user_id      = current_user.id,
             resume_id    = resume_record.id,
             attribute_id = placeholder_attr.id,
-            values       = "true"
+            value        = "true"
         ))
 
     db.commit()
@@ -587,12 +587,12 @@ def update_profile(
     ).first()
 
     if existing:
-        existing.values = payload.values
+        existing.value = payload.value
     else:
         db.add(models.UserProfile(
             user_id      = current_user.id,
             attribute_id = attr.id,
-            values       = payload.values
+            value        = payload.value
         ))
 
     db.commit()
@@ -725,7 +725,7 @@ def _build_profile_response(user: models.User, db: Session) -> dict:
             profile_items.append({
                 "attribute_code":  attr.code,
                 "attribute_name":  attr.name,
-                "values":          entry.values
+                "value":           entry.value
             })
 
     last_resume = db.query(models.Resume).filter(

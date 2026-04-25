@@ -104,7 +104,7 @@ class AttributeResponse(BaseModel):
 class UserProfileItem(BaseModel):
     attribute_code: str
     attribute_name: str
-    values: Optional[str] = None
+    value: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -125,7 +125,7 @@ class UserProfileResponse(BaseModel):
 
 class UpdateProfileRequest(BaseModel):
     attribute_code: str
-    values: str
+    value: str
 
 
 # ── Change Password ───────────────────────────────────────────────────────────

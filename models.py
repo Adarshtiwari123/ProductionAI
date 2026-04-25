@@ -48,7 +48,7 @@ class UserProfile(Base):
     user_id      = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     resume_id    = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=True)
     attribute_id = Column(Integer, ForeignKey("attribute.id", ondelete="CASCADE"), nullable=False)
-    values       = Column(Text, nullable=True)  # Renamed from attribute_value
+    value        = Column(Text, nullable=True)
     created_at   = Column(TIMESTAMP, server_default=func.now(), nullable=False)
     updated_at   = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
 
