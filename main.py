@@ -2,6 +2,19 @@ import os
 import uuid
 import contextlib
 import sys
+import cloudinary
+import cloudinary.uploader
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(env_path, override=True)
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUD_NAME"),
+    api_key=os.getenv("API_KEY"),
+    api_secret=os.getenv("API_SECRET")
+)
 
 # Add current directory to sys.path to support both direct run and module run
 sys.path.append(os.path.dirname(__file__))
@@ -535,25 +548,22 @@ async def update_profile_image(
     if len(img_bytes) > 2 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Profile image must be less than 2 MB")
 
-    # ── Save file to disk ─────────────────────────────────────────────────────
-    img_dir   = os.path.join(os.path.dirname(__file__), "uploads", "profile_images", str(current_user.id))
-    os.makedirs(img_dir, exist_ok=True)
+    # ── Upload to Cloudinary ──────────────────────────────────────────────────
+    result = cloudinary.uploader.upload(
+        img_bytes,
+        folder=f"profile_images/{current_user.id}"
+    )
 
-    ext        = os.path.splitext(profile_image.filename or "image.jpg")[1] or ".jpg"
-    img_name   = f"{uuid.uuid4().hex}{ext}"
-    image_path = os.path.join(img_dir, img_name)
+    image_url = result["secure_url"]
 
-    with open(image_path, "wb") as img_file:
-        img_file.write(img_bytes)
-
-    # ── Store path in users.pic ───────────────────────────────────────────────
-    current_user.pic = image_path
+    # ── Store URL in users.pic ────────────────────────────────────────────────
+    current_user.pic = image_url
     db.commit()
 
     return {
         "success":    True,
         "message":    "Profile image uploaded successfully",
-        "user_image": image_path,
+        "user_image": image_url,
     }
 
 
