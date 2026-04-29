@@ -70,6 +70,8 @@ class UserResponse(BaseModel):
     phone: str
     pic: Optional[str] = None
     is_valid: int
+    interview_limit: int
+    tier: str
 
     class Config:
         from_attributes = True
@@ -183,6 +185,9 @@ class ResumeListResponse(BaseModel):
 
 # ── Packages & Payments (New) ────────────────────────────────────────────────
 
+class SubscriptionRequest(BaseModel):
+    package_id: int
+
 class PackageResponse(BaseModel):
     id: int
     name: str
@@ -197,9 +202,12 @@ class PackageResponse(BaseModel):
 class SubscriptionResponse(BaseModel):
     id: int
     package_id: int
+    package_name: str
+    interview_limit: int
+    pricing: float
     start_date: datetime
     end_date: datetime
-    status: str
+    status: int
 
     class Config:
         from_attributes = True

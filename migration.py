@@ -27,6 +27,26 @@ def migrate_schema(engine):
                 print("🔹 Adding 'pic' column to 'users' table...")
                 conn.execute(text("ALTER TABLE users ADD COLUMN pic TEXT"))
                 conn.commit()
+            # Check if plan exists and rename it to interview_limit
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='plan'")).fetchone()
+            if res:
+                print("🔹 Renaming 'plan' -> 'interview_limit' in 'users' table...")
+                conn.execute(text("ALTER TABLE users RENAME COLUMN plan TO interview_limit"))
+                conn.commit()
+
+            # Check if tier exists and its type
+            res = conn.execute(text("SELECT data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='tier'")).fetchone()
+            if not res:
+                print("🔹 Adding 'tier' column to 'users' table...")
+                conn.execute(text("ALTER TABLE users ADD COLUMN tier VARCHAR(10) DEFAULT 'Free' NOT NULL"))
+                conn.commit()
+            elif res[0] == 'smallint' or res[0] == 'integer':
+                print("🔹 Altering 'tier' column to VARCHAR in 'users' table...")
+                # First alter column type to varchar
+                conn.execute(text("ALTER TABLE users ALTER COLUMN tier DROP DEFAULT"))
+                conn.execute(text("ALTER TABLE users ALTER COLUMN tier TYPE VARCHAR(10) USING CASE WHEN tier::text='1' THEN 'Free' WHEN tier::text='2' THEN 'Paid' ELSE 'Free' END"))
+                conn.execute(text("ALTER TABLE users ALTER COLUMN tier SET DEFAULT 'Free'"))
+                conn.commit()
         except Exception as e:
             print(f"⚠️ 'users' migration note: {e}")
 

@@ -13,16 +13,16 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL:
     from urllib.parse import urlparse
     parsed = urlparse(DATABASE_URL)
-    print(f"🔌 Database connected to: {parsed.hostname} on port {parsed.port}")
+    print(f"[DB] Database connected to: {parsed.hostname} on port {parsed.port}")
 else:
-    print("❌ No DATABASE_URL found")
+    print("[ERROR] No DATABASE_URL found")
 
 # Render sometimes gives "postgres://", but SQLAlchemy requires "postgresql://"
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 if not DATABASE_URL:
-    raise RuntimeError("❌ DATABASE_URL is not set in the environment or .env file.")
+    raise RuntimeError("[ERROR] DATABASE_URL is not set in the environment or .env file.")
 
 # For SQLite, we need 'check_same_thread=False' (keeping this logic in case of explicit SQLite use)
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}

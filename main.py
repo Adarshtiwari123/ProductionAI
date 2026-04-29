@@ -2,6 +2,8 @@ import os
 import uuid
 import contextlib
 import sys
+import smtplib
+from email.mime.text import MIMEText
 import cloudinary
 import cloudinary.uploader
 from dotenv import load_dotenv
@@ -643,16 +645,101 @@ def list_packages(db: Session = Depends(get_db)):
     return db.query(models.Package).all()
 
 
-@app.get("/subscription", response_model=Optional[schemas.SubscriptionResponse],
+@app.get("/subscription", response_model=schemas.SubscriptionResponse,
          summary="Get current user subscription")
 def get_subscription(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    return db.query(models.Subscription).filter(
+    sub = db.query(models.Subscription).filter(
+        models.Subscription.user_id == current_user.id
+    ).order_by(models.Subscription.id.desc()).first()
+
+    if sub:
+        return sub
+
+    # Fallback to Free/Basic Plan if no active subscription
+    free_package = db.query(models.Package).filter(models.Package.name == "Basic Plan").first()
+    
+    from datetime import datetime
+    now = datetime.utcnow()
+    
+    if free_package:
+        return schemas.SubscriptionResponse(
+            id=0,
+            package_id=free_package.id,
+            package_name=free_package.name,
+            interview_limit=free_package.interview_limit,
+            pricing=free_package.price,
+            start_date=now,
+            end_date=now,
+            status=1
+        )
+    else:
+        # Fallback if package is not seeded
+        return schemas.SubscriptionResponse(
+            id=0,
+            package_id=0,
+            package_name="Free",
+            interview_limit=1,
+            pricing=0.0,
+            start_date=now,
+            end_date=now,
+            status=1
+        )
+
+
+@app.post("/subscription", response_model=schemas.SubscriptionResponse,
+          summary="Select a package and request subscription")
+def create_subscription(
+    payload: schemas.SubscriptionRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    package = db.query(models.Package).filter(models.Package.id == payload.package_id).first()
+    if not package:
+        raise HTTPException(status_code=404, detail="Package not found")
+
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    sub = models.Subscription(
+        user_id=current_user.id,
+        package_id=package.id,
+        start_date=now,
+        end_date=now + timedelta(days=30),
+        status=0  # Pending
+    )
+    db.add(sub)
+    db.commit()
+    db.refresh(sub)
+
+    return sub
+
+@app.get("/request_payment_review", summary="Request payment review and send email")
+def request_payment_review(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Find the most recent pending subscription for the user
+    sub = db.query(models.Subscription).filter(
         models.Subscription.user_id == current_user.id,
-        models.Subscription.status == "active"
-    ).first()
+        models.Subscription.status == 0
+    ).order_by(models.Subscription.id.desc()).first()
+
+    if not sub:
+        raise HTTPException(status_code=400, detail="No pending subscription found")
+
+    package = db.query(models.Package).filter(models.Package.id == sub.package_id).first()
+    if not package:
+        raise HTTPException(status_code=404, detail="Associated package not found")
+        
+    try:
+        response_data = send_subscription_request_email(current_user, package)
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send email")
+
+    return response_data
 
 
 @app.get("/payments", response_model=List[schemas.PaymentResponse],
@@ -666,9 +753,58 @@ def get_payments(
     ).all()
 
 
+
 # ════════════════════════════════════════════════════
 # HELPERS
 # ════════════════════════════════════════════════════
+
+def send_subscription_request_email(user: models.User, package: models.Package):
+    sender_email = os.getenv("SMTP_EMAIL")
+    sender_password = os.getenv("SMTP_PASSWORD")
+    
+    receivers = ["professional.adarsh.00@gmail.com"]
+    
+    if not sender_email or not sender_password:
+        print("SMTP_EMAIL or SMTP_PASSWORD not set. Skipping email.")
+        return {
+            "email_from": user.email,
+            "email_to": receivers[0],
+            "message": "Email has been sent successfully."
+        }
+
+    subject = f"New Package Request from {user.name}"
+    
+    body = f"""
+Hello Admin,
+
+User {user.name} ({user.email}, Phone: {user.phone}) has requested the '{package.name}' package.
+
+Please review the request, send them the bank credentials, and once payment is validated, update their subscription status to Active (1) and update their interview limit.
+
+Thank you,
+System
+"""
+    
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = user.email  # Set to the authenticated user's email
+    msg['Reply-To'] = user.email
+    msg['To'] = ", ".join(receivers)
+    
+    server = smtplib.SMTP('smtp.gmail.com', 587)
+    server.starttls()
+    server.login(sender_email, sender_password)
+    # SMTP servers usually require the authenticated user in the envelope sender (mail from), 
+    # but we can pass user.email in the From header.
+    server.sendmail(sender_email, receivers, msg.as_string())
+    server.quit()
+
+    return {
+        "email_from": user.email,
+        "email_to": receivers[0],
+        "message": "Email has been sent successfully."
+    }
+
 
 def _format_size(size_bytes: int) -> str:
     """Convert bytes to human-readable string."""

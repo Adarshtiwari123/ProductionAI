@@ -13,8 +13,10 @@ class User(Base):
     email         = Column(String(100), unique=True, nullable=False, index=True)
     phone         = Column(String(20), nullable=False)
     pic           = Column(Text, nullable=True)          # Base64 or URL profile image
-    is_valid      = Column(SmallInteger, default=1, nullable=False)  # 0=no, 1=yes (renamed from is_approved)
-    password      = Column(String(255), nullable=False)              # bcrypt hash
+    is_valid        = Column(SmallInteger, default=1, nullable=False)  # 0=no, 1=yes (renamed from is_approved)
+    interview_limit = Column(Integer, default=1, nullable=False)  # 1 interview limit by default
+    tier            = Column(String(10), default='Free', nullable=False)  # 'Free' or 'Paid'
+    password        = Column(String(255), nullable=False)              # bcrypt hash
     created_at    = Column(TIMESTAMP, server_default=func.now(), nullable=False)
     updated_at    = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -100,13 +102,25 @@ class Subscription(Base):
     package_id = Column(Integer, ForeignKey("packages.id", ondelete="CASCADE"), nullable=False)
     start_date = Column(DateTime, nullable=False)
     end_date   = Column(DateTime, nullable=False)
-    status     = Column(String(50), default="active")
+    status     = Column(SmallInteger, default=0, nullable=False) # 0=Pending, 1=Active, 2=Requested, 4=Closed
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     user    = relationship("User", back_populates="subscriptions")
     package = relationship("Package", back_populates="subscriptions")
     payments = relationship("Payment", back_populates="subscription")
+
+    @property
+    def package_name(self):
+        return self.package.name if self.package else ""
+
+    @property
+    def interview_limit(self):
+        return self.package.interview_limit if self.package else 0
+
+    @property
+    def pricing(self):
+        return self.package.price if self.package else 0.0
 
 
 class Payment(Base):
