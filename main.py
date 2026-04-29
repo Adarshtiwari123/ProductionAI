@@ -715,8 +715,9 @@ def create_subscription(
 
     return sub
 
-@app.get("/request_payment_review", summary="Request payment review and send email")
+@app.post("/request_payment_review", summary="Request payment review and send email")
 def request_payment_review(
+    payload: schemas.PaymentReviewRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -733,11 +734,34 @@ def request_payment_review(
     if not package:
         raise HTTPException(status_code=404, detail="Associated package not found")
         
+    # Check if transaction ID already exists to avoid UniqueViolation
+    existing_payment = db.query(models.Payment).filter(models.Payment.transaction_id == payload.transaction_id).first()
+    if existing_payment:
+        raise HTTPException(status_code=400, detail="Transaction ID already exists")
+
+    # Create payment record
+    new_payment = models.Payment(
+        user_id=current_user.id,
+        subscription_id=sub.id,
+        amount=payload.amount_paid,
+        payment_method=payload.payment_method,
+        status="pending",
+        transaction_id=payload.transaction_id
+    )
+    db.add(new_payment)
+    db.commit()
+    db.refresh(new_payment)
+    
     try:
-        response_data = send_subscription_request_email(current_user, package)
+        response_data = send_subscription_request_email(current_user, package, payload)
     except Exception as e:
         print(f"Error sending email: {e}")
-        raise HTTPException(status_code=500, detail="Failed to send email")
+        # On platforms like Render (Free Tier), outbound SMTP ports (like 587) are blocked.
+        # So we catch the error and return a graceful success response instead of crashing.
+        response_data = {
+            "success": True,
+            "message": "Payment review requested successfully, but email notification failed (server restriction)."
+        }
 
     return response_data
 
@@ -758,7 +782,7 @@ def get_payments(
 # HELPERS
 # ════════════════════════════════════════════════════
 
-def send_subscription_request_email(user: models.User, package: models.Package):
+def send_subscription_request_email(user: models.User, package: models.Package, payment_details: schemas.PaymentReviewRequest):
     sender_email = os.getenv("SMTP_EMAIL")
     sender_password = os.getenv("SMTP_PASSWORD")
     
@@ -772,14 +796,22 @@ def send_subscription_request_email(user: models.User, package: models.Package):
             "message": "Email has been sent successfully."
         }
 
-    subject = f"New Package Request from {user.name}"
+    subject = f"New Package Request & Payment Details from {user.name}"
+    
+    note_text = payment_details.note if payment_details.note else "None provided"
     
     body = f"""
 Hello Admin,
 
 User {user.name} ({user.email}, Phone: {user.phone}) has requested the '{package.name}' package.
 
-Please review the request, send them the bank credentials, and once payment is validated, update their subscription status to Active (1) and update their interview limit.
+They have submitted the following payment details:
+- Payment Method: {payment_details.payment_method}
+- Transaction ID: {payment_details.transaction_id}
+- Amount Paid: ${payment_details.amount_paid}
+- Note/Sender Name: {note_text}
+
+Please review the request and validate the payment. Once validated, update their subscription status to Active (1) and update their interview limit.
 
 Thank you,
 System

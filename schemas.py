@@ -213,6 +213,13 @@ class SubscriptionResponse(BaseModel):
         from_attributes = True
 
 
+class PaymentReviewRequest(BaseModel):
+    payment_method: str
+    transaction_id: str
+    amount_paid: float
+    note: Optional[str] = None
+
+
 class PaymentResponse(BaseModel):
     id: int
     subscription_id: int
