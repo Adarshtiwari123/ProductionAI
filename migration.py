@@ -146,4 +146,17 @@ def migrate_schema(engine):
         except Exception as e:
             print(f"⚠️ 'resumes' migration note: {e}")
 
+        # 5. Update 'subscriptions' table
+        try:
+            # Check if status exists and its type
+            res = conn.execute(text("SELECT data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='subscriptions' AND column_name='status'")).fetchone()
+            if res and (res[0] == 'character varying' or res[0] == 'varchar' or res[0] == 'text'):
+                print("🔹 Altering 'status' column to SMALLINT in 'subscriptions' table...")
+                conn.execute(text("ALTER TABLE subscriptions ALTER COLUMN status DROP DEFAULT"))
+                conn.execute(text("ALTER TABLE subscriptions ALTER COLUMN status TYPE SMALLINT USING status::smallint"))
+                conn.execute(text("ALTER TABLE subscriptions ALTER COLUMN status SET DEFAULT 0"))
+                conn.commit()
+        except Exception as e:
+            print(f"⚠️ 'subscriptions' migration note: {e}")
+
         print("✅ Migration checks complete.")
