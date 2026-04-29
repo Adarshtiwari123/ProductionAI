@@ -47,6 +47,13 @@ def migrate_schema(engine):
                 conn.execute(text("ALTER TABLE users ALTER COLUMN tier TYPE VARCHAR(10) USING CASE WHEN tier::text='1' THEN 'Free' WHEN tier::text='2' THEN 'Paid' ELSE 'Free' END"))
                 conn.execute(text("ALTER TABLE users ALTER COLUMN tier SET DEFAULT 'Free'"))
                 conn.commit()
+
+            # Check if interview_limit exists
+            res = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='interview_limit'")).fetchone()
+            if not res:
+                print("🔹 Adding 'interview_limit' column to 'users' table...")
+                conn.execute(text("ALTER TABLE users ADD COLUMN interview_limit INTEGER DEFAULT 1 NOT NULL"))
+                conn.commit()
         except Exception as e:
             print(f"⚠️ 'users' migration note: {e}")
 
