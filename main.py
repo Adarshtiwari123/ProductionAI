@@ -721,14 +721,17 @@ def request_payment_review(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # Find the most recent pending subscription for the user
+    # Find the specific subscription for the user
     sub = db.query(models.Subscription).filter(
-        models.Subscription.user_id == current_user.id,
-        models.Subscription.status == 0
-    ).order_by(models.Subscription.id.desc()).first()
+        models.Subscription.id == payload.subscription_id,
+        models.Subscription.user_id == current_user.id
+    ).first()
 
     if not sub:
-        raise HTTPException(status_code=400, detail="No pending subscription found")
+        raise HTTPException(status_code=404, detail="Subscription not found")
+        
+    if sub.status != 0:
+        raise HTTPException(status_code=400, detail="Subscription is not pending")
 
     package = db.query(models.Package).filter(models.Package.id == sub.package_id).first()
     if not package:
@@ -749,6 +752,10 @@ def request_payment_review(
         transaction_id=payload.transaction_id
     )
     db.add(new_payment)
+    
+    # Update subscription status to requested
+    sub.status = 1
+    
     db.commit()
     db.refresh(new_payment)
     
@@ -811,7 +818,7 @@ They have submitted the following payment details:
 - Amount Paid: ${payment_details.amount_paid}
 - Note/Sender Name: {note_text}
 
-Please review the request and validate the payment. Once validated, update their subscription status to Active (1) and update their interview limit.
+Please review the request and validate the payment. Once validated, update their subscription status to Active (2) and update their interview limit.
 
 Thank you,
 System

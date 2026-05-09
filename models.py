@@ -102,7 +102,7 @@ class Subscription(Base):
     package_id = Column(Integer, ForeignKey("packages.id", ondelete="CASCADE"), nullable=False)
     start_date = Column(DateTime, nullable=False)
     end_date   = Column(DateTime, nullable=False)
-    status     = Column(SmallInteger, default=0, nullable=False) # 0=Pending, 1=Active, 2=Requested, 4=Closed
+    status     = Column(SmallInteger, default=0, nullable=False) # 0=Pending, 1=Requested, 2=Active, 3=Closed
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
 

@@ -214,6 +214,7 @@ class SubscriptionResponse(BaseModel):
 
 
 class PaymentReviewRequest(BaseModel):
+    subscription_id: int
     payment_method: str
     transaction_id: str
     amount_paid: float
