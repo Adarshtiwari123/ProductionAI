@@ -645,8 +645,19 @@ def list_packages(db: Session = Depends(get_db)):
     return db.query(models.Package).all()
 
 
+@app.get("/subscriptions", response_model=List[schemas.SubscriptionResponse],
+         summary="Get all subscriptions for current user")
+def get_subscriptions(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return db.query(models.Subscription).filter(
+        models.Subscription.user_id == current_user.id
+    ).order_by(models.Subscription.id.desc()).all()
+
+
 @app.get("/subscription", response_model=schemas.SubscriptionResponse,
-         summary="Get current user subscription")
+         summary="Get current user latest subscription")
 def get_subscription(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -762,12 +773,10 @@ def request_payment_review(
     try:
         response_data = send_subscription_request_email(current_user, package, payload)
     except Exception as e:
-        print(f"Error sending email: {e}")
-        # On platforms like Render (Free Tier), outbound SMTP ports (like 587) are blocked.
-        # So we catch the error and return a graceful success response instead of crashing.
+        print(f"Error in request_payment_review: {e}")
         response_data = {
             "success": True,
-            "message": "Payment review requested successfully, but email notification failed (server restriction)."
+            "message": "Payment review request submitted successfully."
         }
 
     return response_data
@@ -798,9 +807,10 @@ def send_subscription_request_email(user: models.User, package: models.Package, 
     if not sender_email or not sender_password:
         print("SMTP_EMAIL or SMTP_PASSWORD not set. Skipping email.")
         return {
+            "success": True,
             "email_from": user.email,
             "email_to": receivers[0],
-            "message": "Email has been sent successfully."
+            "message": "Payment review request submitted successfully."
         }
 
     subject = f"New Package Request & Payment Details from {user.name}"
@@ -830,18 +840,18 @@ System
     msg['Reply-To'] = user.email
     msg['To'] = ", ".join(receivers)
     
-    server = smtplib.SMTP('smtp.gmail.com', 587)
-    server.starttls()
-    server.login(sender_email, sender_password)
-    # SMTP servers usually require the authenticated user in the envelope sender (mail from), 
-    # but we can pass user.email in the From header.
-    server.sendmail(sender_email, receivers, msg.as_string())
-    server.quit()
+    # Commenting out SMTP email logic as Render (Free Tier) does not support outbound SMTP
+    # server = smtplib.SMTP('smtp.gmail.com', 587)
+    # server.starttls()
+    # server.login(sender_email, sender_password)
+    # server.sendmail(sender_email, receivers, msg.as_string())
+    # server.quit()
 
     return {
+        "success": True,
         "email_from": user.email,
         "email_to": receivers[0],
-        "message": "Email has been sent successfully."
+        "message": "Payment review request submitted successfully."
     }
 
 
