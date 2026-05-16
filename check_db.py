@@ -1,7 +1,19 @@
 import psycopg2
 import sys
 
-db_url = "postgresql://authdb_wer9_user:H2TDpmuvTuXMI5kMzhOwX7dOkAdbXuvR@dpg-d7eenfbeo5us7388c9rg-a.oregon-postgres.render.com:5432/authdb_wer9"
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+db_url = os.getenv("DATABASE_URL")
+
+# Render sometimes gives "postgres://", but psycopg2/sqlalchemy requires "postgresql://"
+if db_url and db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+if not db_url:
+    print("Error: DATABASE_URL not found in .env")
+    sys.exit(1)
 
 try:
     conn = psycopg2.connect(db_url)

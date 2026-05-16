@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, date
 import re
 
 
@@ -232,3 +232,257 @@ class PaymentResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ── Interview Session Schemas (New) ───────────────────────────────────────────
+
+class InterviewSessionBase(BaseModel):
+    role:             str
+    topic:            str
+    difficulty:       str = "medium"
+    duration_minutes: int = 20
+    total_questions:  int = 5
+    resume_id:        Optional[int] = None
+
+class InterviewSessionCreate(InterviewSessionBase):
+    pass
+
+class InterviewSessionResponse(InterviewSessionBase):
+    id:         int
+    user_id:    int
+    status:     str
+    started_at: Optional[datetime] = None
+    ended_at:   Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ── Question Schemas (New) ────────────────────────────────────────────────────
+
+class QuestionBase(BaseModel):
+    text:               str
+    type:               str
+    difficulty:         str
+    role:               str
+    domain:             Optional[str] = None
+    is_company_question: bool = False
+    frequency_score:    int = 0
+
+class QuestionResponse(QuestionBase):
+    id:         int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ── Session Question Schemas (New) ───────────────────────────────────────────
+
+class SessionQuestionBase(BaseModel):
+    session_id:     int
+    question_id:    int
+    question_order: int
+    answer_text:    Optional[str] = None
+    score:          Optional[int] = None
+    ai_feedback:    Optional[str] = None
+    is_skipped:     bool = False
+    answered_at:    Optional[datetime] = None
+
+class SessionQuestionResponse(SessionQuestionBase):
+    id:         int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ── Interview Report Schemas (New) ────────────────────────────────────────────
+
+class InterviewReportBase(BaseModel):
+    session_id:            int
+    user_id:               int
+    overall_score:         Optional[int] = None
+    technical_score:       Optional[int] = None
+    communication_score:   Optional[int] = None
+    problem_solving_score: Optional[int] = None
+    project_score:         Optional[int] = None
+    strengths:             Optional[List[str]] = None
+    improvements:          Optional[List[str]] = None
+    suggestions:           Optional[str] = None
+    pdf_path:              Optional[str] = None
+    generated_at:          Optional[datetime] = None
+
+class InterviewReportResponse(InterviewReportBase):
+    id:         int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ── Company Question Schemas (New) ────────────────────────────────────────────
+
+class CompanyQuestionBase(BaseModel):
+    question_id:     int
+    company_name:    str
+    frequency_score: int = 5
+    role:            Optional[str] = None
+    year_seen:       Optional[int] = None
+    source:          str = "gpt_generated"
+
+class CompanyQuestionResponse(CompanyQuestionBase):
+    id:         int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ── Usage Tracker Schemas (New) ──────────────────────────────────────────────
+
+class UsageTrackerResponse(BaseModel):
+    id:                 int
+    user_id:            int
+    subscription_id:    Optional[int] = None
+    sessions_used:      int
+    questions_used:     int
+    voice_minutes_used: int
+    period_start:       date
+    period_end:         date
+    reset_at:           Optional[datetime] = None
+    created_at:         datetime
+    updated_at:         datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ── Access Validation Schemas (New) ───────────────────────────────────────────
+
+class ValidateAccessRequest(BaseModel):
+    duration_minutes: int
+    role:             str
+    topic:            str
+    difficulty:       str
+
+class ValidateAccessResponse(BaseModel):
+    allowed:               bool
+    credits_remaining:     int
+    cost_required:         Optional[int] = None
+    credits_after:         Optional[int] = None
+    warning:               Optional[str] = None
+    reason:                Optional[str] = None
+    redirect_to:           Optional[str] = None
+    upgrade_required:      Optional[bool] = None
+    # For backward compatibility
+    max_duration_allowed:  Optional[int] = None
+
+
+class InterviewSetupRequest(BaseModel):
+    role:             str
+    topic:            str
+    difficulty:       str
+    duration_minutes: int
+
+class InterviewSetupResponse(BaseModel):
+    success:              bool
+    session_id:           int
+    userid:               int
+    name:                 str
+    role:                 str
+    topic:                str
+    difficulty:           str
+    duration_minutes:     int
+    total_questions:      int
+    resume_id:            Optional[int] = None
+    has_resume:           bool
+    status:               str
+    started_at:           Optional[str] = None
+    credits_remaining:    int
+    credits_used:         int
+    credits_deducted:     int
+
+
+class InterviewChangeSetupRequest(BaseModel):
+    session_id:           int
+
+
+class InterviewChangeSetupResponse(BaseModel):
+    success:              bool
+    message:              str
+    session_id:           int
+    credits_refunded:     int
+    credits_remaining:    int
+
+
+
+class InterviewSessionSummaryResponse(BaseModel):
+    success:              bool
+    session_id:           int
+    userid:               int
+    role:                 str
+    topic:                str
+    difficulty:           str
+    duration_minutes:     int
+    total_questions:      int
+    has_resume:           bool
+    credits_remaining:    int
+    status:               str
+    info_message:         str
+
+class DurationOption(BaseModel):
+    duration: int
+    is_available: bool
+    cost: int
+    unavailable_reason: Optional[str] = None
+
+class UpgradeBanner(BaseModel):
+    show: bool
+    message: str
+    target_plan: Optional[str] = None
+
+class AllowedDurationsResponse(BaseModel):
+    userid: int
+    credits_remaining: int
+    allowed_durations: List[DurationOption]
+    upgrade_banner: UpgradeBanner
+
+
+# ── Interview Execution Schemas (New) ────────────────────────────────────────
+
+class ConfirmStartRequest(BaseModel):
+    session_id:           int
+    userid:               int
+
+class ConfirmStartResponse(BaseModel):
+    success:              bool
+    questions_list:       List[str]
+    ai_greeting:          str
+    conversation_history: List[dict]
+
+class AnswerRequest(BaseModel):
+    session_id:           int
+    userid:               int
+    answer:               str
+    question_number:      int
+    is_skipped:           bool
+    conversation_history: List[dict]
+
+class AnswerResponse(BaseModel):
+    next_ai_message:      str
+    conversation_history: List[dict]
+    question_number:      int
+    interview_complete:   bool
+
+class EndInterviewRequest(BaseModel):
+    session_id:           int
+    userid:               int
+    conversation_history: List[dict]
+
+class EndInterviewResponse(BaseModel):
+    success:              bool
+    message:              str

@@ -7,6 +7,8 @@ from email.mime.text import MIMEText
 import cloudinary
 import cloudinary.uploader
 from dotenv import load_dotenv
+import json
+import openai
 
 # Load environment variables from .env file
 env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -22,7 +24,7 @@ cloudinary.config(
 sys.path.append(os.path.dirname(__file__))
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -46,27 +48,27 @@ os.makedirs(BASE_UPLOAD_DIR, exist_ok=True)
 async def lifespan(app: FastAPI):
     # ── Database Initialization ──────────────────────────────────────────────
     try:
-        print("🚀 Starting database initialization...")
+        print("[START] Starting database initialization...")
         
         # 1. Run manual migrations (renaming columns, etc.)
         migrate_schema(engine)
         
         # 2. Create missing tables (Packages, Subscriptions, Payments, etc.)
-        print("🔨 Syncing tables with models...")
+        print("[BUILD] Syncing tables with models...")
         models.Base.metadata.create_all(bind=engine)
         
         # 3. Seed initial data
         db = next(get_db())
         try:
-            print("🌱 Seeding initial data...")
+            print("[SEED] Seeding initial data...")
             seed_attributes(db)
             seed_packages(db)
-            print("✅ Database setup completed successfully!")
+            print("[SUCCESS] Database setup completed successfully!")
         finally:
             db.close()
             
     except Exception as e:
-        print(f"❌ Error during database initialization: {e}")
+        print(f"[ERROR] Error during database initialization: {e}")
         import traceback
         traceback.print_exc()
     yield
@@ -142,6 +144,23 @@ def register(payload: schemas.RegisterRequest, db: Session = Depends(get_db)):
         is_valid=1
     )
     db.add(user)
+    db.flush() # Get user.id
+
+    # Initialize UsageTracker with 1 free credit
+    from datetime import date, timedelta
+    today = date.today()
+    usage = models.UsageTracker(
+        user_id=user.id,
+        subscription_id=None,
+        sessions_used=0,
+        credits_used=0,
+        credits_remaining=1,
+        questions_used=0,
+        voice_minutes_used=0,
+        period_start=today,
+        period_end=today + timedelta(days=30)
+    )
+    db.add(usage)
     db.commit()
     db.refresh(user)
     return user
@@ -793,6 +812,620 @@ def get_payments(
     ).all()
 
 
+# ════════════════════════════════════════════════════
+# 15. INTERVIEW ACCESS VALIDATION
+# ════════════════════════════════════════════════════
+
+@app.post("/validate-access", response_model=schemas.ValidateAccessResponse,
+          summary="Check if user can start a new interview session based on subscription limits")
+def validate_access(
+    payload: schemas.ValidateAccessRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Validates if a user can start an interview with the selected duration.
+    Rules:
+    1. If remaining interviews <= 0 -> Block completely.
+    2. If remaining interviews == 1 and duration > 10 min -> Block (only 10 min allowed).
+    3. Otherwise -> Allow.
+    """
+    from datetime import datetime
+
+    # Security check: Ensure user is validating their own access
+    # (Redundant with Depends(get_current_user) but kept as logic boundary if needed)
+
+    today = datetime.utcnow().date()
+
+    # STEP 1 - Get active subscription
+    subscription = db.query(models.Subscription).filter(
+        models.Subscription.user_id == current_user.id,
+        models.Subscription.status == 2,
+        models.Subscription.end_date >= today
+    ).order_by(models.Subscription.id.desc()).first()
+
+    if not subscription:
+        return {
+            "allowed": False,
+            "reason": "No active plan found. Please purchase a plan.",
+            "credits_remaining": 0,
+            "upgrade_required": True,
+            "redirect_to": "/plans"
+        }
+
+    # STEP 2 - Get credit costs from Packages
+    package = subscription.package
+    if not package:
+        raise HTTPException(status_code=500, detail="Package configuration missing for your subscription.")
+
+    # STEP 3 - Get credits_remaining from Usage_Tracker
+    usage = db.query(models.UsageTracker).filter(
+        models.UsageTracker.user_id == current_user.id,
+        models.UsageTracker.period_end >= today
+    ).order_by(models.UsageTracker.id.desc()).first()
+
+    credits_remaining = usage.credits_remaining if usage else 0
+
+    # STEP 4 - Calculate cost for requested duration
+    if payload.duration_minutes == 10:
+        cost = package.credit_cost_10min
+    elif payload.duration_minutes == 20:
+        cost = package.credit_cost_20min
+    elif payload.duration_minutes == 40:
+        cost = package.credit_cost_40min
+    else:
+        raise HTTPException(status_code=400, detail="Invalid duration. Must be 10, 20, or 40.")
+
+    # STEP 5 - Check if user can afford it
+    if credits_remaining <= 0:
+        return {
+            "allowed": False,
+            "credits_remaining": 0,
+            "cost_required": cost,
+            "reason": "You have no credits left. Please purchase a plan to continue.",
+            "upgrade_required": True,
+            "redirect_to": "/plans"
+        }
+
+    if credits_remaining < cost:
+        return {
+            "allowed": False,
+            "credits_remaining": credits_remaining,
+            "cost_required": cost,
+            "reason": f"Not enough credits. This interview costs {cost} credits but you have {credits_remaining} remaining. Upgrade your plan.",
+            "upgrade_required": True,
+            "redirect_to": "/plans"
+        }
+
+    # credits_remaining >= cost
+    warning = None
+    if credits_remaining - cost <= 1:
+        warning = f"After this interview you will have {credits_remaining - cost} credit(s) left. Consider upgrading your plan."
+
+    return {
+        "allowed": True,
+        "credits_remaining": credits_remaining,
+        "cost_required": cost,
+        "credits_after": credits_remaining - cost,
+        "warning": warning,
+        "max_duration_allowed": 40 if credits_remaining >= 4 else (20 if credits_remaining >= 2 else 10)
+    }
+
+
+@app.get("/interview/allowed-durations", response_model=schemas.AllowedDurationsResponse,
+         summary="Get available interview durations based on user credits")
+def get_allowed_durations(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Returns available durations and credit costs based on live balance.
+    """
+    from datetime import datetime
+    today = datetime.utcnow().date()
+
+    # STEP 1 - Get credits_remaining from Usage_Tracker
+    usage = db.query(models.UsageTracker).filter(
+        models.UsageTracker.user_id == current_user.id,
+        models.UsageTracker.period_end >= today
+    ).order_by(models.UsageTracker.id.desc()).first()
+    
+    credits_remaining = usage.credits_remaining if usage else 0
+
+    # STEP 2 - Get credit costs from Packages via Subscription
+    subscription = db.query(models.Subscription).filter(
+        models.Subscription.user_id == current_user.id,
+        models.Subscription.status == 2, # Active
+        models.Subscription.end_date >= today
+    ).order_by(models.Subscription.id.desc()).first()
+
+    cost_10 = 1
+    cost_20 = 2
+    cost_40 = 4
+    package_name = "Free"
+
+    if subscription and subscription.package:
+        p = subscription.package
+        cost_10 = p.credit_cost_10min
+        cost_20 = p.credit_cost_20min
+        cost_40 = p.credit_cost_40min
+        package_name = p.name
+
+    # STEP 3 - Calculate availability
+    durations = []
+    
+    # 10 min
+    is_10_avail = credits_remaining >= cost_10
+    durations.append({
+        "duration": 10,
+        "is_available": is_10_avail,
+        "cost": cost_10,
+        "unavailable_reason": None if is_10_avail else f"Not enough credits. Required: {cost_10}, Remaining: {credits_remaining}"
+    })
+
+    # 20 min
+    is_20_avail = credits_remaining >= cost_20
+    durations.append({
+        "duration": 20,
+        "is_available": is_20_avail,
+        "cost": cost_20,
+        "unavailable_reason": None if is_20_avail else f"Not enough credits. Required: {cost_20}, Remaining: {credits_remaining}"
+    })
+
+    # 40 min
+    is_40_avail = credits_remaining >= cost_40
+    durations.append({
+        "duration": 40,
+        "is_available": is_40_avail,
+        "cost": cost_40,
+        "unavailable_reason": None if is_40_avail else f"Not enough credits. Required: {cost_40}, Remaining: {credits_remaining}"
+    })
+
+    # STEP 4 - Calculate Upgrade Banner
+    show_banner = False
+    banner_msg = ""
+    target_plan = ""
+
+    if package_name == "Free" and credits_remaining < cost_20:
+        show_banner = True
+        banner_msg = "Only 10 min interviews available. Upgrade to Basic plan for longer sessions!"
+        target_plan = "Basic"
+    elif credits_remaining < cost_10:
+        show_banner = True
+        banner_msg = "You have run out of credits. Upgrade your plan to continue!"
+        target_plan = "Basic"
+
+    return {
+        "userid": current_user.id,
+        "credits_remaining": credits_remaining,
+        "allowed_durations": durations,
+        "upgrade_banner": {
+            "show": show_banner,
+            "message": banner_msg,
+            "target_plan": target_plan
+        }
+    }
+
+
+@app.post("/interview/setup", response_model=schemas.InterviewSetupResponse, summary="Create a new interview session and update usage tracking")
+def setup_interview(
+    payload: schemas.InterviewSetupRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Sets up a new interview session.
+    1. Re-validates access.
+    2. Calculates question count.
+    3. Links to latest resume.
+    4. Creates session row.
+    5. Increments usage tracking.
+    """
+    from datetime import datetime
+
+    # Security Check
+    # (Redundant with Depends(get_current_user) but kept as logic boundary if needed)
+
+    # Validation: Enum checks
+    if payload.difficulty not in ['easy', 'medium', 'hard']:
+        raise HTTPException(status_code=400, detail="Invalid difficulty level")
+    if payload.duration_minutes not in [10, 20, 40]:
+        raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 10, 20, 40")
+
+    try:
+        # STEP 1 - Re-run access check
+        today = datetime.utcnow().date()
+        
+        # Query Usage_Tracker for the current period
+        usage = db.query(models.UsageTracker).filter(
+            models.UsageTracker.user_id == current_user.id,
+            models.UsageTracker.period_end >= today
+        ).order_by(models.UsageTracker.id.desc()).first()
+
+        if not usage:
+             raise HTTPException(status_code=403, detail="No usage record found. Please ensure you have an active plan.")
+
+        credits_remaining = usage.credits_remaining
+        
+        # Calculate cost
+        if payload.duration_minutes == 10:
+            cost = 1
+        elif payload.duration_minutes == 20:
+            cost = 2
+        elif payload.duration_minutes == 40:
+            cost = 4
+        else:
+            raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 10, 20, 40")
+
+        if credits_remaining < cost:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "Not enough credits for this duration.",
+                    "credits_remaining": credits_remaining,
+                    "cost_required": cost
+                }
+            )
+
+        # STEP 2 - Calculate total_questions
+        duration_map = {10: 5, 20: 10, 40: 20}
+        total_questions = duration_map.get(payload.duration_minutes, 10)
+
+        # STEP 3 - Check if user has uploaded resume
+        resume = db.query(models.Resume).filter(
+            models.Resume.user_id == current_user.id
+        ).order_by(models.Resume.created_at.desc()).first()
+        
+        resume_id = resume.id if resume else None
+        has_resume = True if resume else False
+
+        # STEP 4 - Insert into Interview_Session
+        new_session = models.InterviewSession(
+            user_id=current_user.id,
+            resume_id=resume_id,
+            role=payload.role,
+            topic=payload.topic,
+            difficulty=payload.difficulty,
+            duration_minutes=payload.duration_minutes,
+            total_questions=total_questions,
+            status='active'
+        )
+        db.add(new_session)
+        db.flush() # To get the session ID
+
+        # STEP 5 - Update Usage_Tracker (Deduct Credits)
+        # We use current values for response calculation before committing
+        old_credits_used = usage.credits_used
+        old_credits_remaining = usage.credits_remaining
+
+        usage.credits_used = old_credits_used + cost
+        usage.credits_remaining = max(old_credits_remaining - cost, 0)
+        usage.sessions_used = usage.sessions_used + 1
+        usage.last_deducted_at = datetime.utcnow()
+        usage.updated_at = datetime.utcnow()
+
+        db.commit()
+
+        return {
+            "success": True,
+            "session_id": new_session.id,
+            "userid": current_user.id,
+            "name": current_user.name,
+            "role": payload.role,
+            "topic": payload.topic,
+            "difficulty": payload.difficulty,
+            "duration_minutes": payload.duration_minutes,
+            "total_questions": total_questions,
+            "resume_id": resume_id,
+            "has_resume": has_resume,
+            "status": "active",
+            "started_at": None,
+            "credits_remaining": usage.credits_remaining,
+            "credits_used": usage.credits_used,
+            "credits_deducted": cost
+        }
+
+    except HTTPException as he:
+        db.rollback()
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/interview/change-setup", response_model=schemas.InterviewChangeSetupResponse, summary="Cancel an interview setup and refund credits")
+def change_interview_setup(
+    payload: schemas.InterviewChangeSetupRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Handles cancelling an interview session setup and refunding the credits.
+    1. Fetches the session to determine duration.
+    2. Calculates the refund amount.
+    3. Updates the Usage_Tracker to restore credits and decrement session count.
+    4. Marks the session as abandoned.
+    """
+    from datetime import datetime
+
+    try:
+        # STEP 1 - Get the session to find duration
+        session = db.query(models.InterviewSession).filter(
+            models.InterviewSession.id == payload.session_id,
+            models.InterviewSession.user_id == current_user.id
+        ).first()
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        if session.status != 'active':
+            raise HTTPException(status_code=400, detail="Session cannot be cancelled in its current state")
+
+        if session.started_at is not None:
+            raise HTTPException(status_code=400, detail="Cannot cancel a session that has already started")
+
+        # STEP 2 - Calculate cost to refund
+        duration = session.duration_minutes
+        if duration == 10:
+            refund = 1
+        elif duration == 20:
+            refund = 2
+        elif duration == 40:
+            refund = 4
+        else:
+            refund = 0
+
+        # STEP 3 - Roll back credits in Usage_Tracker
+        today = datetime.utcnow().date()
+        usage = db.query(models.UsageTracker).filter(
+            models.UsageTracker.user_id == current_user.id,
+            models.UsageTracker.period_end >= today
+        ).order_by(models.UsageTracker.id.desc()).first()
+
+        if not usage:
+            raise HTTPException(status_code=403, detail="No active usage record found for refund.")
+
+        usage.credits_used = max(usage.credits_used - refund, 0)
+        usage.credits_remaining = usage.credits_remaining + refund
+        usage.sessions_used = max(usage.sessions_used - 1, 0)
+        usage.updated_at = datetime.utcnow()
+
+        # Update session status to prevent further refunds or starting the session
+        session.status = 'abandoned'
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Session setup cancelled and credits refunded.",
+            "session_id": session.id,
+            "credits_refunded": refund,
+            "credits_remaining": usage.credits_remaining
+        }
+
+    except HTTPException as he:
+        db.rollback()
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/interview/session-summary", response_model=schemas.InterviewSessionSummaryResponse, summary="Get session details for confirmation screen")
+def get_session_summary(
+    session_id: int,
+    userid: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Powers the 'Ready to begin?' confirmation screen.
+    Checks session ownership, status, and calculates remaining interviews.
+    """
+    from datetime import datetime
+    
+    # Security check: Ensure token matches query userid
+    if userid != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized: User ID mismatch")
+
+    try:
+        # STEP 1 - Fetch session
+        session = db.query(models.InterviewSession).filter(
+            models.InterviewSession.id == session_id,
+            models.InterviewSession.user_id == userid
+        ).first()
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        if session.status != 'active':
+            raise HTTPException(status_code=400, detail="Session is not active")
+        
+        if session.started_at is not None:
+            raise HTTPException(status_code=400, detail="Session already started")
+
+        # STEP 2 - Get credits_remaining from Usage_Tracker
+        today = datetime.utcnow().date()
+        
+        usage = db.query(models.UsageTracker).filter(
+            models.UsageTracker.user_id == userid,
+            models.UsageTracker.period_end >= today
+        ).order_by(models.UsageTracker.id.desc()).first()
+
+        credits_remaining = usage.credits_remaining if usage else 0
+
+        return {
+            "success": True,
+            "session_id": session.id,
+            "userid": userid,
+            "role": session.role,
+            "topic": session.topic,
+            "difficulty": session.difficulty,
+            "duration_minutes": session.duration_minutes,
+            "total_questions": session.total_questions,
+            "has_resume": True if session.resume_id else False,
+            "credits_remaining": credits_remaining,
+            "status": session.status,
+            "info_message": "The AI interviewer will greet you and begin asking questions. Use the mic button to answer with voice or type your responses. You can skip questions anytime."
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/interview/confirm-start", response_model=schemas.ConfirmStartResponse, summary="Confirm start of interview and fetch questions")
+def confirm_start(
+    payload: schemas.ConfirmStartRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    from datetime import datetime
+    import random
+
+    if payload.userid != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    session = db.query(models.InterviewSession).filter(
+        models.InterviewSession.id == payload.session_id,
+        models.InterviewSession.user_id == payload.userid
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.started_at is None:
+        session.started_at = datetime.utcnow()
+        db.commit()
+    
+    # Fetch questions based on role and difficulty
+    questions_query = db.query(models.Question).filter(
+        models.Question.role == session.role,
+        models.Question.difficulty == session.difficulty
+    ).all()
+
+    # If not enough, get more from role alone
+    if len(questions_query) < session.total_questions:
+        additional = db.query(models.Question).filter(
+            models.Question.role == session.role,
+            models.Question.difficulty != session.difficulty
+        ).all()
+        questions_query.extend(additional)
+
+    # If still not enough, get random
+    if len(questions_query) < session.total_questions:
+        random_qs = db.query(models.Question).filter(
+            models.Question.role != session.role
+        ).limit(session.total_questions).all()
+        questions_query.extend(random_qs)
+
+    selected_qs = random.sample(questions_query, min(len(questions_query), session.total_questions))
+    questions_list = [q.text for q in selected_qs]
+
+    # Generate AI Greeting
+    ai_greeting = f"Hello {current_user.name}! I am your AI interviewer for today. We will be discussing the {session.role} position with a focus on {session.topic}. Are you ready to begin? Here is your first question: {questions_list[0]}"
+    
+    conversation_history = [
+        {"role": "system", "content": f"You are an expert AI interviewer for the role of {session.role}. The topic is {session.topic} and difficulty is {session.difficulty}. Be professional, encouraging but firm. Keep your responses concise."},
+        {"role": "assistant", "content": ai_greeting}
+    ]
+
+    return {
+        "success": True,
+        "questions_list": questions_list,
+        "ai_greeting": ai_greeting,
+        "conversation_history": conversation_history
+    }
+
+
+@app.post("/api/interview/answer", response_model=schemas.AnswerResponse, summary="Submit an answer and get next question")
+def submit_answer(
+    payload: schemas.AnswerRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if payload.userid != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    session = db.query(models.InterviewSession).filter(
+        models.InterviewSession.id == payload.session_id,
+        models.InterviewSession.user_id == payload.userid
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    history = payload.conversation_history
+    
+    if payload.is_skipped:
+        user_msg = "(The user skipped this question)"
+    else:
+        user_msg = payload.answer
+
+    history.append({"role": "user", "content": user_msg})
+
+    next_q_num = payload.question_number + 1
+    interview_complete = next_q_num > session.total_questions
+
+    if interview_complete:
+        next_ai_message = "Thank you! That concludes our interview. I have gathered enough information to generate your report. You can now end the session."
+    else:
+        # Call GPT to evaluate and ask next
+        try:
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            client = openai.OpenAI(api_key=openai_api_key)
+            
+            # We don't have the list here, so we tell GPT to proceed to next question
+            # Or we could have passed the list in history, but for now let's ask GPT to generate the NEXT logical question based on context and role
+            gpt_response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=history + [{"role": "system", "content": "Acknowledge the user's answer briefly. Then ask the next relevant technical or behavioral question for this role. Do not repeat previous questions."}],
+                temperature=0.7
+            )
+            next_ai_message = gpt_response.choices[0].message.content
+        except Exception as e:
+            next_ai_message = f"Got it. Moving to the next question. (API Error: {str(e)})"
+
+    history.append({"role": "assistant", "content": next_ai_message})
+
+    return {
+        "next_ai_message": next_ai_message,
+        "conversation_history": history,
+        "question_number": next_q_num if not interview_complete else session.total_questions,
+        "interview_complete": interview_complete
+    }
+
+
+@app.post("/api/interview/end", response_model=schemas.EndInterviewResponse, summary="Finalize the interview session")
+def end_interview(
+    payload: schemas.EndInterviewRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    from datetime import datetime
+
+    if payload.userid != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    session = db.query(models.InterviewSession).filter(
+        models.InterviewSession.id == payload.session_id,
+        models.InterviewSession.user_id == payload.userid
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.ended_at = datetime.utcnow()
+    session.status = 'ended'
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Interview completed successfully."
+    }
+
+
 
 # ════════════════════════════════════════════════════
 # HELPERS
@@ -963,3 +1596,129 @@ def change_password(
     current_user.password = auth.hash_password(payload.new_password)
     db.commit()
     return {"message": "Password updated successfully", "success": True}
+
+
+# ════════════════════════════════════════════════════
+# SEED QUESTIONS ENDPOINT
+# ════════════════════════════════════════════════════
+
+@app.post("/admin/questions/seed", summary="Generate and seed interview questions using GPT-4o")
+def seed_questions(db: Session = Depends(get_db)):
+    try:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
+
+        client = openai.OpenAI(api_key=openai_api_key)
+
+        prompt = """Generate 60 interview questions for the following roles:
+Frontend Developer, Backend Developer, Data Analyst,
+Full Stack Developer, HR Manager, Marketing Analyst.
+
+For each role generate exactly 10 questions.
+Mix these types: topic, resume, behavioural, design.
+Mix difficulties: easy, medium, hard.
+Include domain tags like: SQL, Python, React, Power BI,
+CSS, JavaScript, Node.js, System Design, HR Policies,
+Marketing Strategy.
+
+Return ONLY a valid JSON array, no extra text, no markdown.
+Each object must have exactly these fields:
+{
+  "text": "full question text here",
+  "type": "topic",
+  "difficulty": "medium",
+  "role": "Frontend Developer",
+  "domain": "React",
+  "is_company_question": false,
+  "frequency_score": 7
+}
+
+frequency_score is 1-10 based on how commonly this question
+is asked in real company interviews in India."""
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON arrays."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+        )
+
+        content = response.choices[0].message.content.strip()
+
+        # Clean markdown if GPT still returns it
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        
+        content = content.strip()
+
+        try:
+            questions_data = json.loads(content)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="GPT returned invalid JSON, try again")
+        
+        if not isinstance(questions_data, list):
+            raise HTTPException(status_code=500, detail="GPT returned invalid JSON, try again")
+
+        inserted_count = 0
+        for q_data in questions_data:
+            # Map string to enums if necessary, though SQLAlchemy might handle it depending on driver
+            # The model fields: type, difficulty, role, domain, is_company_question, frequency_score
+            new_q = models.Question(
+                text=q_data.get("text"),
+                type=q_data.get("type"),
+                difficulty=q_data.get("difficulty"),
+                role=q_data.get("role"),
+                domain=q_data.get("domain"),
+                is_company_question=q_data.get("is_company_question", False),
+                frequency_score=q_data.get("frequency_score", 0)
+            )
+            db.add(new_q)
+            inserted_count += 1
+        
+        db.commit()
+
+        return {
+            "success": True,
+            "total_inserted": inserted_count,
+            "message": "Questions seeded successfully"
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ════════════════════════════════════════════════════
+# GET INTERVIEW ROLES ENDPOINT
+# ════════════════════════════════════════════════════
+
+@app.get("/interview/roles", summary="Get all distinct roles available in the Questions table")
+def get_interview_roles(db: Session = Depends(get_db)):
+    try:
+        results = db.query(models.Question.role).distinct().order_by(models.Question.role.asc()).all()
+        
+        if not results:
+            return {
+                "success": True,
+                "roles": [],
+                "message": "No roles found. Please seed the questions first."
+            }
+
+        roles = [r[0] for r in results if r[0]]
+        roles.append("Other")
+
+        return {
+            "success": True,
+            "roles": roles
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

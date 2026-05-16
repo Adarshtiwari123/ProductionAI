@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, SmallInteger, String, Text, ForeignKey, TIMESTAMP, Float, DateTime
+from sqlalchemy import Column, Integer, SmallInteger, String, Text, ForeignKey, TIMESTAMP, Float, DateTime, Enum, JSON, Boolean, Date
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -24,6 +24,9 @@ class User(Base):
     resumes       = relationship("Resume", back_populates="user", cascade="all, delete-orphan")
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
     payments      = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
+    interview_sessions = relationship("InterviewSession", back_populates="user", cascade="all, delete-orphan")
+    reports       = relationship("InterviewReport", back_populates="user", cascade="all, delete-orphan")
+    usage_tracker = relationship("UsageTracker", back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
 class Attribute(Base):
@@ -78,6 +81,7 @@ class Resume(Base):
 
     user            = relationship("User", back_populates="resumes")
     profile_entries = relationship("UserProfile", back_populates="resume", cascade="all, delete-orphan")
+    interview_sessions = relationship("InterviewSession", back_populates="resume")
 
 
 class Package(Base):
@@ -87,6 +91,10 @@ class Package(Base):
     name            = Column(String(100), nullable=False)
     price           = Column(Float, nullable=False)
     interview_limit = Column(Integer, nullable=False)
+    total_credits   = Column(Integer, nullable=False, default=0)
+    credit_cost_10min = Column(Integer, nullable=False, default=1)
+    credit_cost_20min = Column(Integer, nullable=False, default=2)
+    credit_cost_40min = Column(Integer, nullable=False, default=4)
     features        = Column(Text, nullable=True) # JSON or Comma-separated
     created_at      = Column(TIMESTAMP, server_default=func.now(), nullable=False)
     updated_at      = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -109,6 +117,7 @@ class Subscription(Base):
     user    = relationship("User", back_populates="subscriptions")
     package = relationship("Package", back_populates="subscriptions")
     payments = relationship("Payment", back_populates="subscription")
+    usage_trackers = relationship("UsageTracker", back_populates="subscription")
 
     @property
     def package_name(self):
@@ -138,3 +147,121 @@ class Payment(Base):
 
     user         = relationship("User", back_populates="payments")
     subscription = relationship("Subscription", back_populates="payments")
+
+
+class InterviewSession(Base):
+    __tablename__ = "Interview_Session"
+
+    id               = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id          = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    resume_id        = Column(Integer, ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True)
+    role             = Column(String(100), nullable=False)
+    topic            = Column(String(100), nullable=False)
+    difficulty       = Column(Enum('easy', 'medium', 'hard', name='difficulty_levels'), nullable=False, default='medium')
+    duration_minutes = Column(Integer, nullable=False, default=20)
+    total_questions  = Column(Integer, nullable=False, default=5)
+    status           = Column(Enum('setup', 'active', 'ended', 'abandoned', name='session_status'), nullable=False, default='setup')
+    started_at       = Column(DateTime, nullable=True)
+    ended_at         = Column(DateTime, nullable=True)
+    created_at       = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    updated_at       = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    user    = relationship("User", back_populates="interview_sessions")
+    resume  = relationship("Resume", back_populates="interview_sessions")
+    questions = relationship("SessionQuestion", back_populates="session", cascade="all, delete-orphan")
+    report    = relationship("InterviewReport", back_populates="session", uselist=False, cascade="all, delete-orphan")
+
+
+class Question(Base):
+    __tablename__ = "Questions"
+
+    id                 = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    text               = Column(Text, nullable=False)
+    type               = Column(Enum('topic', 'resume', 'behavioural', 'design', name='question_type'), nullable=False)
+    difficulty         = Column(Enum('easy', 'medium', 'hard', name='question_difficulty'), nullable=False)
+    role               = Column(String(100), nullable=False)
+    domain             = Column(String(100), nullable=True)
+    is_company_question = Column(Boolean, default=False)
+    frequency_score    = Column(Integer, default=0)
+    created_at         = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    session_links     = relationship("SessionQuestion", back_populates="question")
+    company_links     = relationship("CompanyQuestion", back_populates="question", cascade="all, delete-orphan")
+
+
+class SessionQuestion(Base):
+    __tablename__ = "Session_Questions"
+
+    id             = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    session_id     = Column(Integer, ForeignKey("Interview_Session.id", ondelete="CASCADE"), nullable=False)
+    question_id    = Column(Integer, ForeignKey("Questions.id", ondelete="RESTRICT"), nullable=False)
+    question_order = Column(Integer, nullable=False)
+    answer_text    = Column(Text, nullable=True)
+    score          = Column(Integer, nullable=True) # 0 to 10
+    ai_feedback    = Column(Text, nullable=True)
+    is_skipped     = Column(Boolean, default=False)
+    answered_at    = Column(DateTime, nullable=True)
+    created_at     = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+
+    session  = relationship("InterviewSession", back_populates="questions")
+    question = relationship("Question", back_populates="session_links")
+
+
+class InterviewReport(Base):
+    __tablename__ = "Interview_Report"
+
+    id                    = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    session_id            = Column(Integer, ForeignKey("Interview_Session.id", ondelete="CASCADE"), unique=True, nullable=False)
+    user_id               = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    overall_score         = Column(Integer, nullable=True) # 0 to 100
+    technical_score       = Column(Integer, nullable=True) # 0 to 25
+    communication_score   = Column(Integer, nullable=True) # 0 to 25
+    problem_solving_score = Column(Integer, nullable=True) # 0 to 25
+    project_score         = Column(Integer, nullable=True) # 0 to 25
+    strengths             = Column(JSON, nullable=True)
+    improvements          = Column(JSON, nullable=True)
+    suggestions           = Column(Text, nullable=True)
+    pdf_path              = Column(String(255), nullable=True)
+    generated_at          = Column(DateTime, nullable=True)
+    created_at            = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+
+    session = relationship("InterviewSession", back_populates="report")
+    user    = relationship("User", back_populates="reports")
+
+
+class CompanyQuestion(Base):
+    __tablename__ = "Company_Questions"
+
+    id              = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    question_id     = Column(Integer, ForeignKey("Questions.id", ondelete="CASCADE"), nullable=False)
+    company_name    = Column(String(100), nullable=False)
+    frequency_score = Column(Integer, nullable=False, default=5)
+    role            = Column(String(100), nullable=True)
+    year_seen       = Column(Integer, nullable=True)
+    source          = Column(Enum('manual', 'gpt_generated', 'user_reported', name='source_type'), default='gpt_generated')
+    created_at      = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+
+    question = relationship("Question", back_populates="company_links")
+
+
+class UsageTracker(Base):
+    __tablename__ = "Usage_Tracker"
+
+    id                 = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id            = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    subscription_id    = Column(Integer, ForeignKey("subscriptions.id", ondelete="SET NULL"), nullable=True)
+    sessions_used      = Column(Integer, nullable=False, default=0)
+    credits_used       = Column(Integer, nullable=False, default=0)
+    credits_remaining  = Column(Integer, nullable=False, default=0)
+    questions_used     = Column(Integer, nullable=False, default=0)
+    voice_minutes_used = Column(Integer, nullable=False, default=0)
+    period_start       = Column(Date, nullable=False)
+    period_end         = Column(Date, nullable=False)
+    last_deducted_at   = Column(DateTime, nullable=True)
+    reset_at           = Column(DateTime, nullable=True)
+    created_at         = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    user         = relationship("User", back_populates="usage_tracker")
+    subscription = relationship("Subscription", back_populates="usage_trackers")
