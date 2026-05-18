@@ -13,6 +13,5 @@ pymupdf
 cloudinary
 <<<<<<< HEAD
 openai
-=======
 openai
->>>>>>> a8b352d (some issues fixed)
+
