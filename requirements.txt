@@ -11,4 +11,8 @@ bcrypt==4.0.1
 passlib==1.7.4
 pymupdf
 cloudinary
+<<<<<<< HEAD
 openai
+=======
+openai
+>>>>>>> a8b352d (some issues fixed)

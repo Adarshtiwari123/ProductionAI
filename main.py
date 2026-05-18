@@ -939,6 +939,7 @@ def get_allowed_durations(
         models.Subscription.end_date >= today
     ).order_by(models.Subscription.id.desc()).first()
 
+    cost_5 = 1
     cost_10 = 1
     cost_20 = 2
     cost_40 = 4
@@ -950,10 +951,20 @@ def get_allowed_durations(
         cost_20 = p.credit_cost_20min
         cost_40 = p.credit_cost_40min
         package_name = p.name
+        cost_5 = cost_10 # Fallback to cost_10 if not defined
 
     # STEP 3 - Calculate availability
     durations = []
     
+    # 5 min
+    is_5_avail = credits_remaining >= cost_5
+    durations.append({
+        "duration": 5,
+        "is_available": is_5_avail,
+        "cost": cost_5,
+        "unavailable_reason": None if is_5_avail else f"Not enough credits. Required: {cost_5}, Remaining: {credits_remaining}"
+    })
+
     # 10 min
     is_10_avail = credits_remaining >= cost_10
     durations.append({
@@ -980,6 +991,10 @@ def get_allowed_durations(
         "cost": cost_40,
         "unavailable_reason": None if is_40_avail else f"Not enough credits. Required: {cost_40}, Remaining: {credits_remaining}"
     })
+
+    # If free tier, only allow 5 minutes
+    if current_user.tier == "free":
+        durations = [d for d in durations if d["duration"] == 5]
 
     # STEP 4 - Calculate Upgrade Banner
     show_banner = False
@@ -1029,8 +1044,11 @@ def setup_interview(
     # Validation: Enum checks
     if payload.difficulty not in ['easy', 'medium', 'hard']:
         raise HTTPException(status_code=400, detail="Invalid difficulty level")
-    if payload.duration_minutes not in [10, 20, 40]:
-        raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 10, 20, 40")
+    if payload.duration_minutes not in [5, 10, 20, 40]:
+        raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 5, 10, 20, 40")
+        
+    if current_user.tier == "free" and payload.duration_minutes > 5:
+        raise HTTPException(status_code=403, detail="Free plan allows maximum 5 minute interviews only")
 
     try:
         # STEP 1 - Re-run access check
@@ -1048,14 +1066,16 @@ def setup_interview(
         credits_remaining = usage.credits_remaining
         
         # Calculate cost
-        if payload.duration_minutes == 10:
+        if payload.duration_minutes == 5:
+            cost = 1
+        elif payload.duration_minutes == 10:
             cost = 1
         elif payload.duration_minutes == 20:
             cost = 2
         elif payload.duration_minutes == 40:
             cost = 4
         else:
-            raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 10, 20, 40")
+            raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 5, 10, 20, 40")
 
         if credits_remaining < cost:
             return JSONResponse(
@@ -1068,7 +1088,7 @@ def setup_interview(
             )
 
         # STEP 2 - Calculate total_questions
-        duration_map = {10: 5, 20: 10, 40: 20}
+        duration_map = {5: 5, 10: 5, 20: 10, 40: 20}
         total_questions = duration_map.get(payload.duration_minutes, 10)
 
         # STEP 3 - Check if user has uploaded resume
@@ -1336,6 +1356,110 @@ def confirm_start(
         "questions_list": questions_list,
         "ai_greeting": ai_greeting,
         "conversation_history": conversation_history
+    }
+
+
+from fastapi import Request
+import urllib.parse
+
+@app.post("/interview/launch", summary="Launch interview and get Streamlit URL")
+def launch_interview(
+    payload: schemas.ConfirmStartRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    userid = payload.userid
+    session_id = payload.session_id
+    
+    # 1. Check current_user["id"] == userid, else 403 Unauthorized
+    if current_user.id != userid:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    # 2. Fetch session from Interview_Session table
+    session = db.query(models.InterviewSession).filter(
+        models.InterviewSession.id == session_id,
+        models.InterviewSession.user_id == userid
+    ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    if session.status in ["ended", "abandoned"]:
+        raise HTTPException(status_code=400, detail="This interview session has already been used")
+        
+    # 3. Fetch user from users table WHERE id = userid
+    user = db.query(models.User).filter(models.User.id == userid).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    if user.tier == "free":
+        if session.duration_minutes > 5:
+            raise HTTPException(status_code=403, detail="Free plan allows maximum 5 minute interviews only")
+        if session.total_questions > 5:
+            raise HTTPException(status_code=403, detail="Free plan allows maximum 5 questions only")
+            
+    # 4. Call the existing confirm-start logic internally
+    try:
+        result = confirm_start(payload=payload, db=db, current_user=current_user)
+        ai_greeting = result["ai_greeting"]
+        questions_list = result["questions_list"]
+        conversation_history = result["conversation_history"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to generate interview questions")
+        
+    # 5. Build Streamlit redirect URL
+    base = "https://pyspaceai-elnvkx9xny6rituuasqp8x.streamlit.app/"
+    
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    token = auth_header.replace("Bearer ", "")
+    
+    params = {
+        "token": token,
+        "session_id": str(session_id),
+        "userid": str(userid),
+        "duration": str(session.duration_minutes),
+        "total_questions": str(session.total_questions),
+        "ai_greeting": ai_greeting,
+        "history": json.dumps(conversation_history),
+        "questions": json.dumps(questions_list)
+    }
+    
+    query_string = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    full_streamlit_url = f"{base}?{query_string}"
+    
+    return { "success": True, "redirect_url": full_streamlit_url }
+
+
+@app.get("/interview/verify-session", summary="Verify session validity for Streamlit")
+def verify_session(
+    session_id: int,
+    userid: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # 1. Check current_user["id"] == userid, else 403 Unauthorized
+    if current_user.id != userid:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    # 2. Fetch session from Interview_Session table
+    session = db.query(models.InterviewSession).filter(
+        models.InterviewSession.id == session_id,
+        models.InterviewSession.user_id == userid
+    ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Invalid session")
+        
+    # 3. Return
+    return {
+        "success": True,
+        "session_id": session_id,
+        "status": session.status,
+        "duration_minutes": session.duration_minutes,
+        "total_questions": session.total_questions
     }
 
 
