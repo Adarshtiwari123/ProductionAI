@@ -1307,8 +1307,16 @@ def confirm_start(
     if payload.userid != current_user.id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
+
+    actual_session_id = payload.session_id
+    if isinstance(actual_session_id, str):
+        try:
+            token_data = auth.decode_token(actual_session_id)
+            actual_session_id = token_data.get("session_id")
+        except Exception:
+            pass
     session = db.query(models.InterviewSession).filter(
-        models.InterviewSession.id == payload.session_id,
+        models.InterviewSession.id == actual_session_id,
         models.InterviewSession.user_id == payload.userid
     ).first()
 
@@ -1481,8 +1489,16 @@ def submit_answer(
     if payload.userid != current_user.id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
+
+    actual_session_id = payload.session_id
+    if isinstance(actual_session_id, str):
+        try:
+            token_data = auth.decode_token(actual_session_id)
+            actual_session_id = token_data.get("session_id")
+        except Exception:
+            pass
     session = db.query(models.InterviewSession).filter(
-        models.InterviewSession.id == payload.session_id,
+        models.InterviewSession.id == actual_session_id,
         models.InterviewSession.user_id == payload.userid
     ).first()
 
@@ -1541,8 +1557,16 @@ def end_interview(
     if payload.userid != current_user.id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
+
+    actual_session_id = payload.session_id
+    if isinstance(actual_session_id, str):
+        try:
+            token_data = auth.decode_token(actual_session_id)
+            actual_session_id = token_data.get("session_id")
+        except Exception:
+            pass
     session = db.query(models.InterviewSession).filter(
-        models.InterviewSession.id == payload.session_id,
+        models.InterviewSession.id == actual_session_id,
         models.InterviewSession.user_id == payload.userid
     ).first()
 
@@ -1871,8 +1895,16 @@ def end_interview(
         raise HTTPException(status_code=403, detail="User ID mismatch")
 
     # Verify session belongs to user
+
+    actual_session_id = payload.session_id
+    if isinstance(actual_session_id, str):
+        try:
+            token_data = auth.decode_token(actual_session_id)
+            actual_session_id = token_data.get("session_id")
+        except Exception:
+            pass
     session = db.query(models.InterviewSession).filter(
-        models.InterviewSession.id == payload.session_id,
+        models.InterviewSession.id == actual_session_id,
         models.InterviewSession.user_id == current_user.id
     ).first()
     

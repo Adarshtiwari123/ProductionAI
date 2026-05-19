@@ -454,8 +454,10 @@ class AllowedDurationsResponse(BaseModel):
 
 # ── Interview Execution Schemas (New) ────────────────────────────────────────
 
+from typing import Union
+
 class ConfirmStartRequest(BaseModel):
-    session_id:           int
+    session_id:           Union[int, str]
     userid:               int
 
 class ConfirmStartResponse(BaseModel):
@@ -465,7 +467,7 @@ class ConfirmStartResponse(BaseModel):
     conversation_history: List[dict]
 
 class AnswerRequest(BaseModel):
-    session_id:           int
+    session_id:           Union[int, str]
     userid:               int
     answer:               str
     question_number:      int
@@ -479,7 +481,7 @@ class AnswerResponse(BaseModel):
     interview_complete:   bool
 
 class EndInterviewRequest(BaseModel):
-    session_id:           int
+    session_id:           Union[int, str]
     userid:               int
     conversation_history: List[dict]
 
