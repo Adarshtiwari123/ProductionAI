@@ -1409,8 +1409,8 @@ def launch_interview(
         raise HTTPException(status_code=500, detail="Failed to generate interview questions")
         
     # 5. Build Streamlit redirect URL
-    base = "https://pyspaceai-elnvkx9xny6rituuasqp8x.streamlit.app/"
-    
+    #base = "https://pyspaceai-elnvkx9xny6rituuasqp8x.streamlit.app/"
+    base = "https://interviewai-nfpypdpihrbukcmlrhwolb.streamlit.app"
     auth_header = request.headers.get("Authorization")
     if not auth_header:
         raise HTTPException(status_code=401, detail="Authorization header missing")
