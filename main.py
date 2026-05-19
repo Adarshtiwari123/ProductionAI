@@ -1418,7 +1418,7 @@ def launch_interview(
     
     params = {
         "token": token,
-        "session_id": str(session_id),
+        "session_id": auth.create_access_token({"session_id": session_id}),
         "userid": str(userid),
         "duration": str(session.duration_minutes),
         "total_questions": str(session.total_questions),
@@ -1435,18 +1435,27 @@ def launch_interview(
 
 @app.get("/interview/verify-session", summary="Verify session validity for Streamlit")
 def verify_session(
-    session_id: int,
+    session_id: str,
     userid: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    # Decode session_id (which is now a code)
+    try:
+        payload = auth.decode_token(session_id)
+        actual_session_id = payload.get("session_id")
+        if not actual_session_id:
+            raise HTTPException(status_code=400, detail="Invalid session code")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid or expired session code")
+
     # 1. Check current_user["id"] == userid, else 403 Unauthorized
     if current_user.id != userid:
         raise HTTPException(status_code=403, detail="Unauthorized")
         
     # 2. Fetch session from Interview_Session table
     session = db.query(models.InterviewSession).filter(
-        models.InterviewSession.id == session_id,
+        models.InterviewSession.id == actual_session_id,
         models.InterviewSession.user_id == userid
     ).first()
     
@@ -1456,7 +1465,7 @@ def verify_session(
     # 3. Return
     return {
         "success": True,
-        "session_id": session_id,
+        "session_id": actual_session_id,
         "status": session.status,
         "duration_minutes": session.duration_minutes,
         "total_questions": session.total_questions
@@ -1845,4 +1854,127 @@ def get_interview_roles(db: Session = Depends(get_db)):
             "roles": roles
         }
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ════════════════════════════════════════════════════
+# END INTERVIEW ENDPOINT
+# ════════════════════════════════════════════════════
+
+@app.post("/api/interview/end", response_model=schemas.EndInterviewResponse, summary="Evaluate and save completed interview session")
+def end_interview(
+    payload: schemas.EndInterviewRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if payload.userid != current_user.id:
+        raise HTTPException(status_code=403, detail="User ID mismatch")
+
+    # Verify session belongs to user
+    session = db.query(models.InterviewSession).filter(
+        models.InterviewSession.id == payload.session_id,
+        models.InterviewSession.user_id == current_user.id
+    ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found or access denied")
+    
+    try:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
+
+        client = openai.OpenAI(api_key=openai_api_key)
+
+        prompt = f"""You are an expert technical interviewer evaluator.
+Review the following interview transcript and generate an evaluation report in STRICT JSON format.
+
+The JSON MUST exactly match this structure:
+{{
+  "questions": [
+    {{
+      "answer_text": "extracted text of the candidate's answer (or empty if skipped)",
+      "score": 0,
+      "ai_feedback": "detailed feedback for this answer",
+      "is_skipped": false
+    }}
+  ],
+  "report": {{
+    "overall_score": 85,
+    "technical_score": 80,
+    "communication_score": 90,
+    "problem_solving_score": 85,
+    "project_score": 80,
+    "strengths": ["strength1", "strength2"],
+    "improvements": ["improvement1", "improvement2"],
+    "suggestions": "overall suggestions for the candidate"
+  }}
+}}
+
+Ensure all scores are integers between 0 and 100.
+The number of objects in the "questions" array MUST match the number of questions asked by the interviewer in the transcript. If the candidate didn't answer or asked to skip, set is_skipped to true.
+
+Transcript:
+{json.dumps(payload.conversation_history)}
+"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={{"type": "json_object"}},
+            messages=[
+                {{"role": "system", "content": "You are a helpful assistant that outputs only valid JSON objects."}},
+                {{"role": "user", "content": prompt}}
+            ],
+            temperature=0.7,
+        )
+
+        content = response.choices[0].message.content.strip()
+        eval_data = json.loads(content)
+        
+        questions_data = eval_data.get("questions", [])
+        report_data = eval_data.get("report", {})
+        
+        # INSERT into Session_Questions
+        for i, q_data in enumerate(questions_data, start=1):
+            sq = models.SessionQuestion(
+                session_id=payload.session_id,
+                question_id=1,  # Placeholder as requested
+                question_order=i,
+                answer_text=q_data.get("answer_text", ""),
+                score=q_data.get("score", 0),
+                ai_feedback=q_data.get("ai_feedback", ""),
+                is_skipped=q_data.get("is_skipped", False)
+            )
+            db.add(sq)
+        
+        # INSERT into Interview_Report
+        # Note: as requested, json.dumps() is used for strengths and improvements
+        report = models.InterviewReport(
+            session_id=payload.session_id,
+            user_id=current_user.id,
+            overall_score=report_data.get("overall_score", 0),
+            technical_score=report_data.get("technical_score", 0),
+            communication_score=report_data.get("communication_score", 0),
+            problem_solving_score=report_data.get("problem_solving_score", 0),
+            project_score=report_data.get("project_score", 0),
+            strengths=json.dumps(report_data.get("strengths", [])),
+            improvements=json.dumps(report_data.get("improvements", [])),
+            suggestions=report_data.get("suggestions", "")
+        )
+        db.add(report)
+        
+        # Update session status
+        from datetime import datetime
+        session.status = 'ended'
+        session.ended_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {{"success": True, "message": "Interview evaluated and saved successfully"}}
+        
+    except json.JSONDecodeError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="GPT returned invalid JSON")
+    except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
