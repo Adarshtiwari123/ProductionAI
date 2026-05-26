@@ -867,14 +867,17 @@ def validate_access(
     credits_remaining = usage.credits_remaining if usage else 0
 
     # STEP 4 - Calculate cost for requested duration
-    if payload.duration_minutes == 10:
+    if payload.duration_minutes == 5:
+        # Fallback to 10min cost since Package model doesn't explicitly store 5min cost
+        cost = package.credit_cost_10min
+    elif payload.duration_minutes == 10:
         cost = package.credit_cost_10min
     elif payload.duration_minutes == 20:
         cost = package.credit_cost_20min
     elif payload.duration_minutes == 40:
         cost = package.credit_cost_40min
     else:
-        raise HTTPException(status_code=400, detail="Invalid duration. Must be 10, 20, or 40.")
+        raise HTTPException(status_code=400, detail="Invalid duration. Must be 5, 10, 20, or 40.")
 
     # STEP 5 - Check if user can afford it
     if credits_remaining <= 0:
@@ -1327,40 +1330,316 @@ def confirm_start(
         session.started_at = datetime.utcnow()
         db.commit()
     
-    # Fetch questions based on role and difficulty
-    questions_query = db.query(models.Question).filter(
-        models.Question.role == session.role,
-        models.Question.difficulty == session.difficulty
-    ).all()
-
-    # If not enough, get more from role alone
-    if len(questions_query) < session.total_questions:
-        additional = db.query(models.Question).filter(
-            models.Question.role == session.role,
-            models.Question.difficulty != session.difficulty
+    # STEP 2 - Fetch resume context from user_profile
+    resume_context = ""
+    if session.resume_id:
+        profiles = db.query(models.UserProfile).join(models.Attribute).filter(
+            models.UserProfile.user_id == session.user_id,
+            models.UserProfile.resume_id == session.resume_id,
+            models.Attribute.code.in_([
+                'technical_skills', 'skills', 'projects', 
+                'experience', 'education', 'project_details',
+                'professional_experience', 'achievements', 'key_results'
+            ])
         ).all()
-        questions_query.extend(additional)
+        
+        context_parts = []
+        resume_skills = []
+        resume_projects = []
+        resume_experience = []
+        resume_education = []
+        for p in profiles:
+            if p.value and p.value.strip():
+                context_parts.append(f"{p.attribute.name}: {p.value}")
+                if p.attribute.code in ['technical_skills', 'skills']:
+                    resume_skills.append(p.value)
+                elif p.attribute.code in ['projects', 'project_details', 'achievements', 'key_results']:
+                    resume_projects.append(p.value)
+                elif p.attribute.code in ['experience', 'professional_experience']:
+                    resume_experience.append(p.value)
+                elif p.attribute.code in ['education']:
+                    resume_education.append(p.value)
+        resume_context = "\n".join(context_parts)
 
-    # If still not enough, get random
-    if len(questions_query) < session.total_questions:
-        random_qs = db.query(models.Question).filter(
-            models.Question.role != session.role
-        ).limit(session.total_questions).all()
-        questions_query.extend(random_qs)
+    class ResumeContext:
+        def __init__(self, s, p, e, ed):
+            self.skills = "\n".join(s) if s else "Not provided"
+            self.projects = "\n".join(p) if p else "Not provided"
+            self.experience = "\n".join(e) if e else "Not provided"
+            self.education = "\n".join(ed) if ed else "Not provided"
+            self.is_empty = not (s or p or e or ed)
 
-    selected_qs = random.sample(questions_query, min(len(questions_query), session.total_questions))
-    questions_list = [q.text for q in selected_qs]
+    resume_ctx = ResumeContext(resume_skills, resume_projects, resume_experience, resume_education)
 
-    # Generate AI Greeting
-    ai_greeting = f"Hello {current_user.name}! I am your AI interviewer for today. We will be discussing the {session.role} position with a focus on {session.topic}. Are you ready to begin? Here is your first question: {questions_list[0]}"
+    # FIX 1 — Role matching for ALL roles
+    role_mapping = {
+        "frontend": "Frontend Developer",
+        "frontend developer": "Frontend Developer",
+        "backend": "Backend Developer",
+        "backend developer": "Backend Developer",
+        "full stack": "Full Stack Developer",
+        "fullstack": "Full Stack Developer",
+        "full stack developer": "Full Stack Developer",
+        "data analyst": "Data Analyst",
+        "analyst": "Data Analyst",
+        "hr": "HR Manager",
+        "hr manager": "HR Manager",
+        "human resources": "HR Manager",
+        "marketing": "Marketing Analyst",
+        "marketing analyst": "Marketing Analyst",
+        "software engineer": "Software Engineer",
+        "engineer": "Software Engineer"
+    }
+    normalized_role = role_mapping.get(session.role.lower(), session.role)
+
+    # FIX 2 — No-repeat across all sessions
+    used_question_ids = []
     
+    previously_used = db.query(models.SessionQuestion.question_id).join(
+        models.InterviewSession, 
+        models.SessionQuestion.session_id == models.InterviewSession.id
+    ).filter(
+        models.InterviewSession.user_id == current_user.id
+    ).all()
+    
+    for q_id in previously_used:
+        used_question_ids.append(q_id[0])
+
+    def fetch_question(difficulty, q_type=None, role=normalized_role):
+        def _try_fetch(exclude_ids):
+            base_query = db.query(models.Question)
+            if exclude_ids:
+                base_query = base_query.filter(models.Question.id.notin_(exclude_ids))
+            
+            query = base_query.filter(
+                models.Question.difficulty == difficulty,
+                models.func.lower(models.Question.role) == models.func.lower(role)
+            )
+            if q_type:
+                query = query.filter(models.Question.type == q_type)
+                
+            q_obj = query.first()
+            
+            if not q_obj and q_type:
+                q_obj = base_query.filter(
+                    models.Question.difficulty == difficulty,
+                    models.func.lower(models.Question.role) == models.func.lower(role)
+                ).first()
+                
+            if not q_obj:
+                q_obj = base_query.filter(
+                    models.func.lower(models.Question.role) == models.func.lower(role)
+                ).first()
+                
+            if not q_obj:
+                q_obj = base_query.filter(
+                    models.func.lower(models.Question.domain) == models.func.lower(session.topic)
+                ).first()
+                
+            return q_obj
+
+        q_obj = _try_fetch(used_question_ids)
+        if not q_obj and used_question_ids:
+            q_obj = _try_fetch([])
+            
+        if q_obj:
+            used_question_ids.append(q_obj.id)
+            return q_obj
+            
+        return None
+
+    q1 = fetch_question('easy', 'resume')
+    q2 = fetch_question('easy', 'topic')
+    q3 = fetch_question('medium', 'resume')
+    q4 = fetch_question('medium', 'topic')
+    q5 = fetch_question('hard', None)
+
+    fetched_qs = [q1, q2, q3, q4, q5]
+    if any(q is None for q in fetched_qs):
+        return {"success": False, "error": "No questions available for this role yet"}
+
+    # FIX 3 — Project name extraction
+    def extract_project_names(projects_text):
+        lines = projects_text.split('\n')
+        p_names = []
+        for line in lines:
+            line = line.strip()
+            if '|' in line:
+                name = line.split('|')[0].strip()
+                if len(name) > 3:
+                    p_names.append(name)
+            elif ' - ' in line and len(line) < 60:
+                name = line.split(' - ')[0].strip()
+                if len(name) > 3:
+                    p_names.append(name)
+        return p_names[:3]
+
+    project_names = extract_project_names(resume_ctx.projects)
+
+    # FIX 4 — Experience field
+    if resume_ctx.experience.strip() and resume_ctx.experience != "Not provided":
+        experience_context = resume_ctx.experience
+    elif resume_ctx.education.strip() and resume_ctx.education != "Not provided":
+        experience_context = resume_ctx.education
+    else:
+        experience_context = "Fresher / Entry Level"
+
+    # FIX 5, 8 & 1 — Combined single AI call for personalization and tips
+    personalized_q1 = q1.text
+    personalized_q3 = q3.text
+    tips = ["Provide a clear explanation.", "Focus on key concepts.", "Relate this to your experience.", "Use structured reasoning.", "Explain your logic step-by-step."]
+
+    if not resume_ctx.is_empty:
+        try:
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            client = openai.OpenAI(api_key=openai_api_key)
+            prompt_sys = "You are an expert interview question personalizer and coach. Return ONLY valid JSON. No markdown formatting, no backticks, no explanation."
+            prompt_user = f"""Candidate profile:
+- Role applying for: {normalized_role}
+- Skills: {resume_ctx.skills}
+- Projects/Achievements: {', '.join(project_names) if project_names else 'None'}
+
+Questions:
+Q1: {q1.text}
+Q2: {q2.text}
+Q3: {q3.text}
+Q4: {q4.text}
+Q5: {q5.text}
+
+Rules:
+1. Rewrite Q1 to mention ONE specific skill from candidate profile
+2. Rewrite Q3 to mention ONE specific project/achievement name
+3. If no projects exist (e.g. HR/Marketing role), rewrite Q3 to mention a specific skill or domain instead
+4. Keep same difficulty and intent
+5. Maximum 1 sentence each for rewritten questions
+6. Provide a 1-line answering tip for EACH of the 5 questions.
+7. Return ONLY this JSON:
+{{
+  "personalized": {{"q1": "rewritten question here", "q3": "rewritten question here"}},
+  "tips": ["tip1", "tip2", "tip3", "tip4", "tip5"]
+}}"""
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": prompt_sys},
+                    {"role": "user", "content": prompt_user}
+                ],
+                temperature=0.7
+            )
+            resp_text = response.choices[0].message.content.strip()
+            if resp_text.startswith("```"):
+                resp_text = resp_text.strip("`").strip()
+                if resp_text.startswith("json"):
+                    resp_text = resp_text[4:].strip()
+            
+            ai_data = json.loads(resp_text)
+            if "personalized" in ai_data:
+                personalized_q1 = ai_data["personalized"].get("q1", q1.text)
+                personalized_q3 = ai_data["personalized"].get("q3", q3.text)
+            if "tips" in ai_data and len(ai_data["tips"]) == 5:
+                tips = ai_data["tips"]
+        except Exception as e:
+            print("AI personalization failed:", e)
+
+    final_questions_text = [personalized_q1, q2.text, personalized_q3, q4.text, q5.text]
+
+    # Save to Session_Questions table
+    db.query(models.SessionQuestion).filter(models.SessionQuestion.session_id == session.id).delete()
+    for idx, (q_obj, q_txt) in enumerate(zip(fetched_qs, final_questions_text)):
+        if q_obj:
+            sq = models.SessionQuestion(
+                session_id=session.id,
+                question_id=q_obj.id,
+                question_order=idx + 1,
+                answer_text=None,
+                score=None,
+                ai_feedback=None,
+                is_skipped=False
+            )
+            db.add(sq)
+    db.commit()
+
+    # FIX 6 — Enhanced ai_greeting
+    has_projects = len(project_names) > 0
+    first_name = current_user.name.split(' ')[0]
+
+    if has_projects:
+        project_mention = f"I can see you have worked on {' and '.join(project_names[:2])}"
+    else:
+        skill_list = resume_ctx.skills.split(',')
+        first_skill = skill_list[0].strip() if skill_list and skill_list[0] != "Not provided" else session.topic
+        project_mention = f"I can see your background in {first_skill}"
+
+    ai_greeting = f"Hello {first_name}! Welcome to your {session.difficulty} level {normalized_role} interview. {project_mention} — let us see how deep your knowledge goes today. We will focus on {session.topic}. I will ask you 5 questions and give you feedback after each answer. Let us begin. {personalized_q1}"
+
+    # FIX 7 — Enhanced system prompt
+    system_prompt = f"""You are a strict MNC technical interviewer at a top company conducting a real {normalized_role} interview.
+
+Candidate Profile:
+- Name: {current_user.name}
+- Skills: {resume_ctx.skills}
+- Projects/Work: {', '.join(project_names) if project_names else 'None provided'}
+- Background: {experience_context}
+
+Your Behavior Rules:
+- Ask exactly ONE question at a time
+- After candidate answers, give 1-2 line feedback
+- Use words like 'Good point' or 'That needs more depth'
+- Never reveal the score
+- If answer is too short, say 'Can you elaborate further?'
+- If answer is wrong, say 'Not quite — think about it from a {session.topic} perspective'
+- Stay in interviewer character throughout
+- Topic focus: {session.topic}
+- Difficulty: {session.difficulty}
+- Total questions: 5"""
+
     conversation_history = [
-        {"role": "system", "content": f"You are an expert AI interviewer for the role of {session.role}. The topic is {session.topic} and difficulty is {session.difficulty}. Be professional, encouraging but firm. Keep your responses concise."},
+        {"role": "system", "content": system_prompt},
         {"role": "assistant", "content": ai_greeting}
+    ]
+
+    # FIX 8 — Enhanced questions_list format
+    questions_list = [
+        {
+            "order": 1,
+            "question": personalized_q1,
+            "difficulty": "easy",
+            "resume_based": True,
+            "tip": tips[0]
+        },
+        {
+            "order": 2,
+            "question": q2.text,
+            "difficulty": "easy", 
+            "resume_based": False,
+            "tip": tips[1]
+        },
+        {
+            "order": 3,
+            "question": personalized_q3,
+            "difficulty": "medium",
+            "resume_based": True,
+            "tip": tips[2]
+        },
+        {
+            "order": 4,
+            "question": q4.text,
+            "difficulty": "medium",
+            "resume_based": False,
+            "tip": tips[3]
+        },
+        {
+            "order": 5,
+            "question": q5.text,
+            "difficulty": "hard",
+            "resume_based": False,
+            "tip": tips[4]
+        }
     ]
 
     return {
         "success": True,
+        "enhanced": True,
         "questions_list": questions_list,
         "ai_greeting": ai_greeting,
         "conversation_history": conversation_history
@@ -1410,9 +1689,13 @@ def launch_interview(
     # 4. Call the existing confirm-start logic internally
     try:
         result = confirm_start(payload=payload, db=db, current_user=current_user)
+        if not result.get("success"):
+            raise HTTPException(status_code=404, detail=result.get("error", "No questions available"))
         ai_greeting = result["ai_greeting"]
         questions_list = result["questions_list"]
         conversation_history = result["conversation_history"]
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to generate interview questions")
         

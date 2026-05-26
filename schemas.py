@@ -462,9 +462,11 @@ class ConfirmStartRequest(BaseModel):
 
 class ConfirmStartResponse(BaseModel):
     success:              bool
-    questions_list:       List[str]
-    ai_greeting:          str
-    conversation_history: List[dict]
+    enhanced:             Optional[bool] = False
+    error:                Optional[str] = None
+    questions_list:       Optional[List[Union[dict, str]]] = None
+    ai_greeting:          Optional[str] = None
+    conversation_history: Optional[List[dict]] = None
 
 class AnswerRequest(BaseModel):
     session_id:           Union[int, str]
