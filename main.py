@@ -1025,8 +1025,8 @@ def get_allowed_durations(
     }
 
 
-@app.post("/interview/setup", response_model=schemas.InterviewSetupResponse, summary="Create a new interview session and update usage tracking")
-def setup_interview(
+@app.post("/interview/validate-and-setup", summary="Validate access and setup new interview session")
+def validate_and_setup_interview(
     payload: schemas.InterviewSetupRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
@@ -1132,20 +1132,7 @@ def setup_interview(
         return {
             "success": True,
             "session_id": new_session.id,
-            "userid": current_user.id,
-            "name": current_user.name,
-            "role": payload.role,
-            "topic": payload.topic,
-            "difficulty": payload.difficulty,
-            "duration_minutes": payload.duration_minutes,
-            "total_questions": total_questions,
-            "resume_id": resume_id,
-            "has_resume": has_resume,
-            "status": "active",
-            "started_at": None,
-            "credits_remaining": usage.credits_remaining,
-            "credits_used": usage.credits_used,
-            "credits_deducted": cost
+            "user_id": current_user.id
         }
 
     except HTTPException as he:
@@ -1649,8 +1636,8 @@ Your Behavior Rules:
 from fastapi import Request
 import urllib.parse
 
-@app.post("/interview/launch", summary="Launch interview and get Streamlit URL")
-def launch_interview(
+@app.post("/interview/launch-and-confirm", summary="Confirm start and get Pyspace URL with questions")
+def launch_and_confirm_interview(
     payload: schemas.ConfirmStartRequest,
     request: Request,
     db: Session = Depends(get_db),
@@ -1721,7 +1708,11 @@ def launch_interview(
     query_string = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
     full_streamlit_url = f"{base}?{query_string}"
     
-    return { "success": True, "redirect_url": full_streamlit_url }
+    return {
+        "success": True,
+        "Pyspace_interview_url": full_streamlit_url,
+        "questions": questions_list
+    }
 
 
 @app.get("/interview/verify-session", summary="Verify session validity for Streamlit")
