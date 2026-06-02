@@ -9,6 +9,7 @@ import cloudinary.uploader
 from dotenv import load_dotenv
 import json
 import openai
+from groq import Groq
 
 # Load environment variables from .env file
 env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -1398,42 +1399,97 @@ def confirm_start(
             if exclude_ids:
                 base_query = base_query.filter(models.Question.id.notin_(exclude_ids))
             
+            # 1. Exact match (difficulty, role, type)
             query = base_query.filter(
                 models.Question.difficulty == difficulty,
                 models.func.lower(models.Question.role) == models.func.lower(role)
             )
             if q_type:
                 query = query.filter(models.Question.type == q_type)
-                
-            q_obj = query.first()
+            q_obj = query.order_by(models.func.random()).first()
             
-            if not q_obj and q_type:
+            # 2. Fallback: ignore type
+            if not q_obj:
                 q_obj = base_query.filter(
                     models.Question.difficulty == difficulty,
                     models.func.lower(models.Question.role) == models.func.lower(role)
-                ).first()
+                ).order_by(models.func.random()).first()
                 
+            # 3. Fallback: ignore difficulty
             if not q_obj:
                 q_obj = base_query.filter(
                     models.func.lower(models.Question.role) == models.func.lower(role)
-                ).first()
+                ).order_by(models.func.random()).first()
                 
+            # 4. Fallback: Search for the topic inside the question text or domain
             if not q_obj:
+                from sqlalchemy import or_
                 q_obj = base_query.filter(
-                    models.func.lower(models.Question.domain) == models.func.lower(session.topic)
-                ).first()
+                    or_(
+                        models.func.lower(models.Question.domain) == models.func.lower(session.topic),
+                        models.Question.text.ilike(f"%{session.topic}%")
+                    )
+                ).order_by(models.func.random()).first()
                 
             return q_obj
-
+        
+        # ALWAYS use the exclude list to prevent duplicates
         q_obj = _try_fetch(used_question_ids)
-        if not q_obj and used_question_ids:
-            q_obj = _try_fetch([])
-            
         if q_obj:
             used_question_ids.append(q_obj.id)
             return q_obj
             
-        return None
+        # If no relevant question exists in the DB, auto-generate one using the LLM and save it!
+        import os
+        import json
+        from groq import Groq
+        try:
+            groq_api_key = os.getenv("GROQ_API_KEY")
+            client = Groq(api_key=groq_api_key)
+            prompt = f"""You are an expert technical interviewer.
+Generate EXACTLY ONE very brief interview question for a {difficulty} level {role} interview.
+The topic/domain is: {session.topic}.
+Type requested: {q_type}
+
+Rules:
+1. The question MUST perfectly match the '{difficulty}' difficulty. An 'easy' question must be simple and fundamental.
+2. The question MUST be short and conversational (maximum 15 words). DO NOT write complex scenarios.
+3. If type is 'resume', ask a simple experience-based question. If 'design', a simple architecture question. If 'behavioural', a simple behavioral question.
+4. NEVER ask the candidate to write code, scripts, or queries. All questions must focus entirely on theory, concepts, or past experience.
+
+Return ONLY valid JSON with a single key "text" containing the question string."""
+
+            resp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "system", "content": prompt}],
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            
+            gen_data = json.loads(resp.choices[0].message.content)
+            new_text = gen_data.get("text", f"Can you explain your experience with {session.topic}?")
+            
+            # Map type safely
+            safe_type = q_type if q_type in ['topic', 'resume', 'behavioural', 'design'] else 'topic'
+            
+            new_q = models.Question(
+                text=new_text,
+                type=safe_type,
+                difficulty=difficulty,
+                role=role,
+                domain=session.topic,
+                is_company_question=False,
+                frequency_score=1
+            )
+            db.add(new_q)
+            db.commit()
+            db.refresh(new_q)
+            
+            used_question_ids.append(new_q.id)
+            return new_q
+        except Exception as e:
+            print("Auto-generate question failed:", e)
+            return None
 
     q1 = fetch_question('easy', 'resume')
     q2 = fetch_question('easy', 'topic')
@@ -1478,8 +1534,9 @@ def confirm_start(
 
     if not resume_ctx.is_empty:
         try:
-            openai_api_key = os.getenv("OPENAI_API_KEY")
-            client = openai.OpenAI(api_key=openai_api_key)
+            groq_api_key = os.getenv("GROQ_API_KEY")
+            client = Groq(api_key=groq_api_key)
+            
             prompt_sys = "You are an expert interview question personalizer and coach. Return ONLY valid JSON. No markdown formatting, no backticks, no explanation."
             prompt_user = f"""Candidate profile:
 - Role applying for: {normalized_role}
@@ -1494,34 +1551,31 @@ Q4: {q4.text}
 Q5: {q5.text}
 
 Rules:
-1. Rewrite Q1 to mention ONE specific skill from candidate profile
-2. Rewrite Q3 to mention ONE specific project/achievement name
-3. If no projects exist (e.g. HR/Marketing role), rewrite Q3 to mention a specific skill or domain instead
-4. Keep same difficulty and intent
-5. Maximum 1 sentence each for rewritten questions
-6. Provide a 1-line answering tip for EACH of the 5 questions.
-7. Return ONLY this JSON:
+1. Rewrite Q3 to mention ONE specific project/achievement name
+2. If no projects exist (e.g. HR/Marketing role), rewrite Q3 to mention a specific skill or domain instead
+3. Keep same difficulty and intent
+4. Maximum 1 sentence for the rewritten question
+5. Provide a 1-line answering tip for EACH of the 5 questions.
+6. Return ONLY this JSON:
 {{
-  "personalized": {{"q1": "rewritten question here", "q3": "rewritten question here"}},
+  "personalized": {{"q3": "rewritten question here"}},
   "tips": ["tip1", "tip2", "tip3", "tip4", "tip5"]
 }}"""
+            
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {"role": "system", "content": prompt_sys},
                     {"role": "user", "content": prompt_user}
                 ],
-                temperature=0.7
+                temperature=0.3,
+                max_tokens=1000,
+                response_format={"type": "json_object"}
             )
             resp_text = response.choices[0].message.content.strip()
-            if resp_text.startswith("```"):
-                resp_text = resp_text.strip("`").strip()
-                if resp_text.startswith("json"):
-                    resp_text = resp_text[4:].strip()
             
             ai_data = json.loads(resp_text)
             if "personalized" in ai_data:
-                personalized_q1 = ai_data["personalized"].get("q1", q1.text)
                 personalized_q3 = ai_data["personalized"].get("q3", q3.text)
             if "tips" in ai_data and len(ai_data["tips"]) == 5:
                 tips = ai_data["tips"]
@@ -1557,7 +1611,7 @@ Rules:
         first_skill = skill_list[0].strip() if skill_list and skill_list[0] != "Not provided" else session.topic
         project_mention = f"I can see your background in {first_skill}"
 
-    ai_greeting = f"Hello {first_name}! Welcome to your {session.difficulty} level {normalized_role} interview. {project_mention} — let us see how deep your knowledge goes today. We will focus on {session.topic}. I will ask you 5 questions and give you feedback after each answer. Let us begin. {personalized_q1}"
+    ai_greeting = f"Hello {first_name}! Welcome to your {normalized_role} interview. {project_mention} — let us see how deep your knowledge goes today. We will focus on {session.topic}. I will ask you 5 questions and give you feedback after each answer. Let us begin. {personalized_q1}"
 
     # FIX 7 — Enhanced system prompt
     system_prompt = f"""You are a strict MNC technical interviewer at a top company conducting a real {normalized_role} interview.
@@ -1785,37 +1839,72 @@ def submit_answer(
         user_msg = "(The user skipped this question)"
     else:
         user_msg = payload.answer
-
     history.append({"role": "user", "content": user_msg})
-
     next_q_num = payload.question_number + 1
     interview_complete = next_q_num > session.total_questions
-
+    # Fetch the exact next question from Session_Questions (if interview is not complete)
+    next_question_text = ""
+    if not interview_complete:
+        next_sq = db.query(models.SessionQuestion).filter(
+            models.SessionQuestion.session_id == session.id,
+            models.SessionQuestion.question_order == next_q_num
+        ).first()
+        next_question_text = next_sq.question.text if next_sq and next_sq.question else "Can you elaborate further?"
+    # Evaluate using Groq LLM
+    try:
+        import json
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        client = Groq(api_key=groq_api_key)
+        
+        system_instruction = f"""Evaluate the user's answer.
+Respond in valid JSON format ONLY, with the following keys:
+- "feedback_to_user": A 1-2 sentence brief feedback acknowledging their answer. Do NOT provide the correct solution. NEVER ask follow-up questions, and NEVER ask the user to write code or queries.
+- "ai_feedback": A private detailed technical evaluation of their answer (what was missing, what was good).
+- "score": An integer score from 0 to 10 based on accuracy and depth.
+User answered: {user_msg}"""
+        llm_response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "system", "content": system_instruction}],
+            temperature=0.3,
+            max_tokens=1000,
+            response_format={"type": "json_object"}
+        )
+        
+        resp_text = llm_response.choices[0].message.content
+        ai_data = json.loads(resp_text)
+        
+        feedback_to_user = ai_data.get("feedback_to_user", "Got it.")
+        ai_feedback = ai_data.get("ai_feedback", "No detailed feedback generated.")
+        score = ai_data.get("score", 0)
+        
+    except Exception as e:
+        feedback_to_user = f"Got it. (Evaluation error: {str(e)})"
+        ai_feedback = f"Error evaluating: {str(e)}"
+        score = 0
+    # Save user answer, score, and feedback to the database
+    current_sq = db.query(models.SessionQuestion).filter(
+        models.SessionQuestion.session_id == session.id,
+        models.SessionQuestion.question_order == payload.question_number
+    ).first()
+    
+    if current_sq:
+        current_sq.answer_text = user_msg
+        current_sq.is_skipped = payload.is_skipped
+        current_sq.score = score
+        current_sq.ai_feedback = ai_feedback
+        from datetime import datetime
+        current_sq.answered_at = datetime.utcnow()
+        db.commit()
     if interview_complete:
-        next_ai_message = "Thank you! That concludes our interview. I have gathered enough information to generate your report. You can now end the session."
+        next_ai_message = f"{feedback_to_user} Thank you! That concludes our interview. I have gathered enough information to generate your report. You can now end the session."
     else:
-        # Call GPT to evaluate and ask next
-        try:
-            openai_api_key = os.getenv("OPENAI_API_KEY")
-            client = openai.OpenAI(api_key=openai_api_key)
-            
-            # We don't have the list here, so we tell GPT to proceed to next question
-            # Or we could have passed the list in history, but for now let's ask GPT to generate the NEXT logical question based on context and role
-            gpt_response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=history + [{"role": "system", "content": "Acknowledge the user's answer briefly. Then ask the next relevant technical or behavioral question for this role. Do not repeat previous questions."}],
-                temperature=0.7
-            )
-            next_ai_message = gpt_response.choices[0].message.content
-        except Exception as e:
-            next_ai_message = f"Got it. Moving to the next question. (API Error: {str(e)})"
-
+        # Ask the exact next question from the database
+        next_ai_message = f"{feedback_to_user}\n\n{next_question_text}"
     history.append({"role": "assistant", "content": next_ai_message})
-
     return {
         "next_ai_message": next_ai_message,
         "conversation_history": history,
-        "question_number": next_q_num if not interview_complete else session.total_questions,
+        "question_number": next_q_num,
         "interview_complete": interview_complete
     }
 
@@ -1850,6 +1939,71 @@ def end_interview(
     session.ended_at = datetime.utcnow()
     session.status = 'ended'
     db.commit()
+
+    # Generate Report Logic
+    existing_report = db.query(models.InterviewReport).filter(models.InterviewReport.session_id == session.id).first()
+    if not existing_report:
+        session_questions = db.query(models.SessionQuestion).filter(
+            models.SessionQuestion.session_id == session.id
+        ).order_by(models.SessionQuestion.question_order).all()
+
+        qa_context = ""
+        for sq in session_questions:
+            q_text = sq.question.text if sq.question else "Unknown question"
+            ans_text = sq.answer_text if sq.answer_text else "(No answer provided)"
+            qa_context += f"Q: {q_text}\nA: {ans_text}\n\n"
+
+        import json
+        from groq import Groq
+        import os
+        try:
+            groq_api_key = os.getenv("GROQ_API_KEY")
+            client = Groq(api_key=groq_api_key)
+            system_prompt = """You are an expert technical recruiter evaluating an interview.
+Analyze the provided Questions and Answers and respond in valid JSON format ONLY with the following keys:
+- "overall_score": Integer (0-100)
+- "technical_score": Integer (0-25)
+- "communication_score": Integer (0-25)
+- "problem_solving_score": Integer (0-25)
+- "project_score": Integer (0-25)
+- "strengths": Array of 3-5 strings detailing candidate strengths
+- "improvements": Array of 3-5 strings detailing areas of improvement
+- "suggestions": A brief paragraph giving overall suggestions."""
+
+            user_prompt = f"Here is the interview transcript:\n\n{qa_context}"
+
+            llm_response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1500,
+                response_format={"type": "json_object"}
+            )
+            
+            resp_text = llm_response.choices[0].message.content
+            ai_data = json.loads(resp_text)
+
+            new_report = models.InterviewReport(
+                session_id=session.id,
+                user_id=session.user_id,
+                overall_score=ai_data.get("overall_score", 0),
+                technical_score=ai_data.get("technical_score", 0),
+                communication_score=ai_data.get("communication_score", 0),
+                problem_solving_score=ai_data.get("problem_solving_score", 0),
+                project_score=ai_data.get("project_score", 0),
+                strengths=ai_data.get("strengths", []),
+                improvements=ai_data.get("improvements", []),
+                suggestions=ai_data.get("suggestions", "No suggestions provided."),
+                generated_at=datetime.utcnow()
+            )
+            db.add(new_report)
+            db.commit()
+        except Exception as e:
+            print("Failed to generate report:", e)
+            db.rollback()
 
     return {
         "success": True,
@@ -2036,11 +2190,17 @@ def change_password(
 @app.post("/admin/questions/seed", summary="Generate and seed interview questions using GPT-4o")
 def seed_questions(db: Session = Depends(get_db)):
     try:
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
-
-        client = openai.OpenAI(api_key=openai_api_key)
+        # OLD - OpenAI (cost reason)
+        # openai_api_key = os.getenv("OPENAI_API_KEY")
+        # if not openai_api_key:
+        #     raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
+        # client = openai.OpenAI(api_key=openai_api_key)
+        
+        # NEW - Groq Llama 3.3 70B (free tier)
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured.")
+        client = Groq(api_key=groq_api_key)
 
         prompt = """Generate 60 interview questions for the following roles:
 Frontend Developer, Backend Developer, Data Analyst,
@@ -2068,13 +2228,25 @@ Each object must have exactly these fields:
 frequency_score is 1-10 based on how commonly this question
 is asked in real company interviews in India."""
 
+        # OLD - OpenAI (cost reason)
+        # response = client.chat.completions.create(
+        #     model="gpt-4o",
+        #     messages=[
+        #         {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON arrays."},
+        #         {"role": "user", "content": prompt}
+        #     ],
+        #     temperature=0.7,
+        # )
+        
+        # NEW - Groq Llama 3.3 70B (free tier)
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON arrays."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
+            max_tokens=1000
         )
 
         content = response.choices[0].message.content.strip()
@@ -2186,11 +2358,17 @@ def end_interview(
         raise HTTPException(status_code=404, detail="Interview session not found or access denied")
     
     try:
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
-
-        client = openai.OpenAI(api_key=openai_api_key)
+        # OLD - OpenAI (cost reason)
+        # openai_api_key = os.getenv("OPENAI_API_KEY")
+        # if not openai_api_key:
+        #     raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
+        # client = openai.OpenAI(api_key=openai_api_key)
+        
+        # NEW - Groq Llama 3.3 70B (free tier)
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured.")
+        client = Groq(api_key=groq_api_key)
 
         prompt = f"""You are an expert technical interviewer evaluator.
 Review the following interview transcript and generate an evaluation report in STRICT JSON format.
@@ -2224,14 +2402,27 @@ Transcript:
 {json.dumps(payload.conversation_history)}
 """
 
+        # OLD - OpenAI (cost reason)
+        # response = client.chat.completions.create(
+        #     model="gpt-4o",
+        #     response_format={"type": "json_object"},
+        #     messages=[
+        #         {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON objects."},
+        #         {"role": "user", "content": prompt}
+        #     ],
+        #     temperature=0.7,
+        # )
+        
+        # NEW - Groq Llama 3.3 70B (free tier)
         response = client.chat.completions.create(
-            model="gpt-4o",
-            response_format={{"type": "json_object"}},
+            model="llama-3.3-70b-versatile",
+            response_format={"type": "json_object"},
             messages=[
-                {{"role": "system", "content": "You are a helpful assistant that outputs only valid JSON objects."}},
-                {{"role": "user", "content": prompt}}
+                {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON objects."},
+                {"role": "user", "content": prompt}
             ],
             temperature=0.7,
+            max_tokens=1000
         )
 
         content = response.choices[0].message.content.strip()
