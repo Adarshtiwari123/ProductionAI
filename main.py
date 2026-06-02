@@ -8,7 +8,6 @@ import cloudinary
 import cloudinary.uploader
 from dotenv import load_dotenv
 import json
-import openai
 from groq import Groq
 
 # Load environment variables from .env file
