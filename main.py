@@ -816,6 +816,12 @@ def get_payments(
 # 15. INTERVIEW ACCESS VALIDATION
 # ════════════════════════════════════════════════════
 
+DURATION_CREDIT_MAP = {
+    5:  1,
+    10: 2,
+    15: 4
+}
+
 @app.post("/validate-access", response_model=schemas.ValidateAccessResponse,
           summary="Check if user can start a new interview session based on subscription limits")
 def validate_access(
@@ -825,93 +831,41 @@ def validate_access(
 ):
     """
     Validates if a user can start an interview with the selected duration.
-    Rules:
-    1. If remaining interviews <= 0 -> Block completely.
-    2. If remaining interviews == 1 and duration > 10 min -> Block (only 10 min allowed).
-    3. Otherwise -> Allow.
     """
-    from datetime import datetime
+    allowed_durations = [5, 10, 15]
+    if payload.duration_minutes not in allowed_durations:
+        raise HTTPException(status_code=400, detail="Invalid duration. Must be 5, 10, or 15.")
 
-    # Security check: Ensure user is validating their own access
-    # (Redundant with Depends(get_current_user) but kept as logic boundary if needed)
+    required_credits = DURATION_CREDIT_MAP[payload.duration_minutes]
 
-    today = datetime.utcnow().date()
-
-    # STEP 1 - Get active subscription
-    subscription = db.query(models.Subscription).filter(
-        models.Subscription.user_id == current_user.id,
-        models.Subscription.status == 2,
-        models.Subscription.end_date >= today
-    ).order_by(models.Subscription.id.desc()).first()
-
-    if not subscription:
-        return {
-            "allowed": False,
-            "reason": "No active plan found. Please purchase a plan.",
-            "credits_remaining": 0,
-            "upgrade_required": True,
-            "redirect_to": "/plans"
-        }
-
-    # STEP 2 - Get credit costs from Packages
-    package = subscription.package
-    if not package:
-        raise HTTPException(status_code=500, detail="Package configuration missing for your subscription.")
-
-    # STEP 3 - Get credits_remaining from Usage_Tracker
     usage = db.query(models.UsageTracker).filter(
-        models.UsageTracker.user_id == current_user.id,
-        models.UsageTracker.period_end >= today
+        models.UsageTracker.user_id == current_user.id
     ).order_by(models.UsageTracker.id.desc()).first()
 
-    credits_remaining = usage.credits_remaining if usage else 0
+    if not usage:
+        raise HTTPException(status_code=400, detail="Account setup incomplete. Contact support.")
 
-    # STEP 4 - Calculate cost for requested duration
-    if payload.duration_minutes == 5:
-        # Fallback to 10min cost since Package model doesn't explicitly store 5min cost
-        cost = package.credit_cost_10min
-    elif payload.duration_minutes == 10:
-        cost = package.credit_cost_10min
-    elif payload.duration_minutes == 20:
-        cost = package.credit_cost_20min
-    elif payload.duration_minutes == 40:
-        cost = package.credit_cost_40min
-    else:
-        raise HTTPException(status_code=400, detail="Invalid duration. Must be 5, 10, 20, or 40.")
+    if usage.credits_remaining < required_credits:
+        return JSONResponse(status_code=403, content={
+            "error": "insufficient_credits",
+            "message": f"You need {required_credits} credit(s) for {payload.duration_minutes} min interview. You have {usage.credits_remaining}.",
+            "credits_required": required_credits,
+            "credits_available": usage.credits_remaining
+        })
 
-    # STEP 5 - Check if user can afford it
-    if credits_remaining <= 0:
-        return {
-            "allowed": False,
-            "credits_remaining": 0,
-            "cost_required": cost,
-            "reason": "You have no credits left. Please purchase a plan to continue.",
-            "upgrade_required": True,
-            "redirect_to": "/plans"
-        }
-
-    if credits_remaining < cost:
-        return {
-            "allowed": False,
-            "credits_remaining": credits_remaining,
-            "cost_required": cost,
-            "reason": f"Not enough credits. This interview costs {cost} credits but you have {credits_remaining} remaining. Upgrade your plan.",
-            "upgrade_required": True,
-            "redirect_to": "/plans"
-        }
-
-    # credits_remaining >= cost
     warning = None
-    if credits_remaining - cost <= 1:
-        warning = f"After this interview you will have {credits_remaining - cost} credit(s) left. Consider upgrading your plan."
+    if usage.credits_remaining - required_credits <= 1:
+        warning = f"After this interview you will have {usage.credits_remaining - required_credits} credit(s) left. Consider upgrading your plan."
 
     return {
         "allowed": True,
-        "credits_remaining": credits_remaining,
-        "cost_required": cost,
-        "credits_after": credits_remaining - cost,
+        "credits_remaining": usage.credits_remaining,
+        "cost_required": required_credits,
+        "credits_after": usage.credits_remaining - required_credits,
         "warning": warning,
-        "max_duration_allowed": 40 if credits_remaining >= 4 else (20 if credits_remaining >= 2 else 10)
+        "max_duration_allowed": 40 if usage.credits_remaining >= 4 else (20 if usage.credits_remaining >= 2 else 10),
+        "credits_required": required_credits,
+        "credits_after_interview": usage.credits_remaining - required_credits
     }
 
 
@@ -1047,8 +1001,8 @@ def validate_and_setup_interview(
     # Validation: Enum checks
     if payload.difficulty not in ['easy', 'medium', 'hard']:
         raise HTTPException(status_code=400, detail="Invalid difficulty level")
-    if payload.duration_minutes not in [5, 10, 20, 40]:
-        raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 5, 10, 20, 40")
+    if payload.duration_minutes not in [5, 10, 15]:
+        raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 5, 10, 15")
         
     if current_user.tier == "free" and payload.duration_minutes > 5:
         raise HTTPException(status_code=403, detail="Free plan allows maximum 5 minute interviews only")
@@ -1069,16 +1023,7 @@ def validate_and_setup_interview(
         credits_remaining = usage.credits_remaining
         
         # Calculate cost
-        if payload.duration_minutes == 5:
-            cost = 1
-        elif payload.duration_minutes == 10:
-            cost = 1
-        elif payload.duration_minutes == 20:
-            cost = 2
-        elif payload.duration_minutes == 40:
-            cost = 4
-        else:
-            raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 5, 10, 20, 40")
+        cost = DURATION_CREDIT_MAP[payload.duration_minutes]
 
         if credits_remaining < cost:
             return JSONResponse(
@@ -1117,15 +1062,31 @@ def validate_and_setup_interview(
         db.flush() # To get the session ID
 
         # STEP 5 - Update Usage_Tracker (Deduct Credits)
-        # We use current values for response calculation before committing
-        old_credits_used = usage.credits_used
-        old_credits_remaining = usage.credits_remaining
+        required_credits = DURATION_CREDIT_MAP[payload.duration_minutes]
+        
+        result = db.execute(text("""
+            UPDATE "Usage_Tracker" 
+            SET credits_remaining = credits_remaining - :req_credits,
+                credits_used = credits_used + :req_credits,
+                sessions_used = sessions_used + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = :user_id 
+            AND credits_remaining >= :req_credits
+        """), {"req_credits": required_credits, "user_id": current_user.id})
 
-        usage.credits_used = old_credits_used + cost
-        usage.credits_remaining = max(old_credits_remaining - cost, 0)
-        usage.sessions_used = usage.sessions_used + 1
-        usage.last_deducted_at = datetime.utcnow()
-        usage.updated_at = datetime.utcnow()
+        if result.rowcount == 0:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Insufficient credits or concurrent update failed")
+
+        db.execute(text("""
+            UPDATE users SET
+               interview_limit = (
+                 SELECT credits_remaining FROM "Usage_Tracker"
+                 WHERE user_id = :user_id
+                 ORDER BY created_at DESC LIMIT 1
+               )
+             WHERE id = :user_id
+        """), {"user_id": current_user.id})
 
         db.commit()
 
@@ -1202,6 +1163,12 @@ def change_interview_setup(
 
         # Update session status to prevent further refunds or starting the session
         session.status = 'abandoned'
+
+        db.query(models.User).filter(
+            models.User.id == current_user.id
+        ).update({
+            "interview_limit": usage.credits_remaining
+        })
 
         db.commit()
 

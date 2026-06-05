@@ -380,6 +380,8 @@ class ValidateAccessResponse(BaseModel):
     upgrade_required:      Optional[bool] = None
     # For backward compatibility
     max_duration_allowed:  Optional[int] = None
+    credits_required:      Optional[int] = None
+    credits_after_interview: Optional[int] = None
 
 
 class InterviewSetupRequest(BaseModel):
