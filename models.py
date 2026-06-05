@@ -150,7 +150,7 @@ class Payment(Base):
 
 
 class InterviewSession(Base):
-    __tablename__ = "Interview_Session"
+    __tablename__ = "interview_session"
 
     id               = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id          = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
@@ -173,7 +173,7 @@ class InterviewSession(Base):
 
 
 class Question(Base):
-    __tablename__ = "Questions"
+    __tablename__ = "questions"
 
     id                 = Column(Integer, primary_key=True, index=True, autoincrement=True)
     text               = Column(Text, nullable=False)
@@ -191,11 +191,11 @@ class Question(Base):
 
 
 class SessionQuestion(Base):
-    __tablename__ = "Session_Questions"
+    __tablename__ = "session_questions"
 
     id             = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    session_id     = Column(Integer, ForeignKey("Interview_Session.id", ondelete="CASCADE"), nullable=False)
-    question_id    = Column(Integer, ForeignKey("Questions.id", ondelete="RESTRICT"), nullable=False)
+    session_id     = Column(Integer, ForeignKey("interview_session.id", ondelete="CASCADE"), nullable=False)
+    question_id    = Column(Integer, ForeignKey("questions.id", ondelete="RESTRICT"), nullable=False)
     question_order = Column(Integer, nullable=False)
     answer_text    = Column(Text, nullable=True)
     score          = Column(Integer, nullable=True) # 0 to 10
@@ -209,10 +209,10 @@ class SessionQuestion(Base):
 
 
 class InterviewReport(Base):
-    __tablename__ = "Interview_Report"
+    __tablename__ = "interview_report"
 
     id                    = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    session_id            = Column(Integer, ForeignKey("Interview_Session.id", ondelete="CASCADE"), unique=True, nullable=False)
+    session_id            = Column(Integer, ForeignKey("interview_session.id", ondelete="CASCADE"), unique=True, nullable=False)
     user_id               = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     overall_score         = Column(Integer, nullable=True) # 0 to 100
     technical_score       = Column(Integer, nullable=True) # 0 to 25
@@ -231,10 +231,10 @@ class InterviewReport(Base):
 
 
 class CompanyQuestion(Base):
-    __tablename__ = "Company_Questions"
+    __tablename__ = "company_questions"
 
     id              = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    question_id     = Column(Integer, ForeignKey("Questions.id", ondelete="CASCADE"), nullable=False)
+    question_id     = Column(Integer, ForeignKey("questions.id", ondelete="CASCADE"), nullable=False)
     company_name    = Column(String(100), nullable=False)
     frequency_score = Column(Integer, nullable=False, default=5)
     role            = Column(String(100), nullable=True)
@@ -246,7 +246,7 @@ class CompanyQuestion(Base):
 
 
 class UsageTracker(Base):
-    __tablename__ = "Usage_Tracker"
+    __tablename__ = "usage_tracker"
 
     id                 = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id            = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)

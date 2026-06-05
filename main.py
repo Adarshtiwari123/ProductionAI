@@ -1065,7 +1065,7 @@ def validate_and_setup_interview(
         required_credits = DURATION_CREDIT_MAP[payload.duration_minutes]
         
         result = db.execute(text("""
-            UPDATE "Usage_Tracker" 
+            UPDATE "usage_tracker" 
             SET credits_remaining = credits_remaining - :req_credits,
                 credits_used = credits_used + :req_credits,
                 sessions_used = sessions_used + 1,
@@ -1081,7 +1081,7 @@ def validate_and_setup_interview(
         db.execute(text("""
             UPDATE users SET
                interview_limit = (
-                 SELECT credits_remaining FROM "Usage_Tracker"
+                 SELECT credits_remaining FROM "usage_tracker"
                  WHERE user_id = :user_id
                  ORDER BY created_at DESC LIMIT 1
                )

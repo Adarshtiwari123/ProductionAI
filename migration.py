@@ -195,7 +195,7 @@ def migrate_schema(engine):
             # Data update for existing rows
             # For existing user who is on Free plan, set credits_remaining = 1 if they have never taken an interview
             update_sql = """
-            UPDATE "Usage_Tracker" 
+            UPDATE "usage_tracker" 
             SET credits_remaining = 1
             WHERE user_id IN (SELECT id FROM users WHERE tier = 'Free')
             AND sessions_used = 0
