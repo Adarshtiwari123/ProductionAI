@@ -1709,7 +1709,11 @@ def launch_and_confirm_interview(
         
     # 5. Build Streamlit redirect URL
     base = "https://interviewai-nfpypdpihrbukcmlrhwolb.streamlit.app"
-    signed_session_id = auth.create_access_token({"session_id": session.id})
+    signed_session_id = auth.create_access_token({
+        "session_id": session.id,
+        "userid": str(userid),
+        "token": token
+    })
     
     full_streamlit_url = f"{base}?session_id={signed_session_id}"
     
