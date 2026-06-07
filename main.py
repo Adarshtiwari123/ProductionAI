@@ -1707,10 +1707,15 @@ def launch_and_confirm_interview(
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to generate interview questions")
         
-    # Return simple session_id instead of full URL
+    # 5. Build Streamlit redirect URL
+    base = "https://interviewai-nfpypdpihrbukcmlrhwolb.streamlit.app"
+    signed_session_id = auth.create_access_token({"session_id": session.id})
+    
+    full_streamlit_url = f"{base}?session_id={signed_session_id}"
+    
     return {
         "success": True,
-        "Pyspace_interview_url": session.session_id
+        "Pyspace_interview_url": full_streamlit_url
     }
 
 
