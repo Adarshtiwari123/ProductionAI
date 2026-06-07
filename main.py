@@ -1664,69 +1664,77 @@ def launch_and_confirm_interview(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    userid = payload.userid
-    session_id = payload.session_id
-    
-    # 1. Check current_user["id"] == userid, else 403 Unauthorized
-    if current_user.id != userid:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-        
-    # 2. Fetch session from Interview_Session table
-    session = db.query(models.InterviewSession).filter(
-        models.InterviewSession.id == session_id,
-        models.InterviewSession.user_id == userid
-    ).first()
-    
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-        
-    if session.status in ["ended", "abandoned"]:
-        raise HTTPException(status_code=400, detail="This interview session has already been used")
-        
-    # 3. Fetch user from users table WHERE id = userid
-    user = db.query(models.User).filter(models.User.id == userid).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-        
-    if user.tier == "free":
-        if session.duration_minutes > 5:
-            raise HTTPException(status_code=403, detail="Free plan allows maximum 5 minute interviews only")
-        if session.total_questions > 5:
-            raise HTTPException(status_code=403, detail="Free plan allows maximum 5 questions only")
-            
-    # 4. Call the existing confirm-start logic internally
     try:
-        result = confirm_start(payload=payload, db=db, current_user=current_user)
-        if not result.get("success"):
-            raise HTTPException(status_code=404, detail=result.get("error", "No questions available"))
-        ai_greeting = result["ai_greeting"]
-        questions_list = result["questions_list"]
-        conversation_history = result["conversation_history"]
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to generate interview questions")
+        userid = payload.userid
+        session_id = payload.session_id
         
-    # 5. Build Streamlit redirect URL
-    base = "https://interviewai-nfpypdpihrbukcmlrhwolb.streamlit.app"
-    
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-    token = auth_header.replace("Bearer ", "")
+        # 1. Check current_user["id"] == userid, else 403 Unauthorized
+        if current_user.id != userid:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+            
+        # 2. Fetch session from Interview_Session table
+        session = db.query(models.InterviewSession).filter(
+            models.InterviewSession.id == session_id,
+            models.InterviewSession.user_id == userid
+        ).first()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+            
+        if session.status in ["ended", "abandoned"]:
+            raise HTTPException(status_code=400, detail="This interview session has already been used")
+            
+        # 3. Fetch user from users table WHERE id = userid
+        user = db.query(models.User).filter(models.User.id == userid).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+            
+        if user.tier == "free":
+            if session.duration_minutes > 5:
+                raise HTTPException(status_code=403, detail="Free plan allows maximum 5 minute interviews only")
+            if session.total_questions > 5:
+                raise HTTPException(status_code=403, detail="Free plan allows maximum 5 questions only")
+                
+        # 4. Call the existing confirm-start logic internally
+        try:
+            result = confirm_start(payload=payload, db=db, current_user=current_user)
+            if not result.get("success"):
+                raise HTTPException(status_code=404, detail=result.get("error", "No questions available"))
+            ai_greeting = result["ai_greeting"]
+            questions_list = result["questions_list"]
+            conversation_history = result["conversation_history"]
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Failed to generate interview questions")
+            
+        # 5. Build Streamlit redirect URL
+        base = "https://interviewai-nfpypdpihrbukcmlrhwolb.streamlit.app"
+        
+        auth_header = request.headers.get("Authorization")
+        if not auth_header:
+            raise HTTPException(status_code=401, detail="Authorization header missing")
+        token = auth_header.replace("Bearer ", "")
 
-    signed_session_id = auth.create_access_token({
-        "session_id": session.id,
-        "userid": str(userid),
-        "token": token
-    })
-    
-    full_streamlit_url = f"{base}?session_id={signed_session_id}"
-    
-    return {
-        "success": True,
-        "Pyspace_interview_url": full_streamlit_url
-    }
+        signed_session_id = auth.create_access_token({
+            "session_id": session.id,
+            "userid": str(userid),
+            "token": token
+        })
+        
+        full_streamlit_url = f"{base}?session_id={signed_session_id}"
+        
+        return {
+            "success": True,
+            "Pyspace_interview_url": full_streamlit_url
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error_msg": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 @app.get("/interview/verify-session", summary="Verify session validity for Streamlit")
