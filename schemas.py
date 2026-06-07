@@ -466,9 +466,9 @@ class ConfirmStartResponse(BaseModel):
     success:              bool
     enhanced:             Optional[bool] = False
     error:                Optional[str] = None
-    questions_list:       Optional[List[Union[dict, str]]] = None
     ai_greeting:          Optional[str] = None
     conversation_history: Optional[List[dict]] = None
+    Pyspace_interview_url: Optional[str] = None
 
 class AnswerRequest(BaseModel):
     session_id:           Union[int, str]

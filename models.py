@@ -153,6 +153,7 @@ class InterviewSession(Base):
     __tablename__ = "interview_session"
 
     id               = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    session_id       = Column(String(255), unique=True, nullable=True)
     user_id          = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     resume_id        = Column(Integer, ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True)
     role             = Column(String(100), nullable=False)

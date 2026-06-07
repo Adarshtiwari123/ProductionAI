@@ -1050,6 +1050,7 @@ def validate_and_setup_interview(
         # STEP 4 - Insert into Interview_Session
         new_session = models.InterviewSession(
             user_id=current_user.id,
+            session_id=str(uuid.uuid4()),
             resume_id=resume_id,
             role=payload.role,
             topic=payload.topic,
@@ -1706,32 +1707,10 @@ def launch_and_confirm_interview(
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to generate interview questions")
         
-    # 5. Build Streamlit redirect URL
-    #base = "https://pyspaceai-elnvkx9xny6rituuasqp8x.streamlit.app/"
-    base = "https://interviewai-nfpypdpihrbukcmlrhwolb.streamlit.app"
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-    token = auth_header.replace("Bearer ", "")
-    
-    params = {
-        "token": token,
-        "session_id": auth.create_access_token({"session_id": session_id}),
-        "userid": str(userid),
-        "duration": str(session.duration_minutes),
-        "total_questions": str(session.total_questions),
-        "ai_greeting": ai_greeting,
-        "history": json.dumps(conversation_history),
-        "questions": json.dumps(questions_list)
-    }
-    
-    query_string = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
-    full_streamlit_url = f"{base}?{query_string}"
-    
+    # Return simple session_id instead of full URL
     return {
         "success": True,
-        "Pyspace_interview_url": full_streamlit_url,
-        "questions": questions_list
+        "Pyspace_interview_url": session.session_id
     }
 
 
