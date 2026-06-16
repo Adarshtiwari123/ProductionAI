@@ -1706,6 +1706,119 @@ def launch_and_confirm_interview(
         
         full_streamlit_url = f"{base}?session_id={signed_session_id}"
         
+        # --- STEP 1 to 5: Custom Question Logic ---
+        existing_sq_count = db.query(models.SessionQuestion).filter(
+            models.SessionQuestion.session_id == session.id
+        ).count()
+        
+        if existing_sq_count == 0:
+            # Step 1: Session details
+            role_from_session = session.role or ""
+            topic_from_session = session.topic or ""
+            difficulty_from_session = session.difficulty or "medium"
+            resume_id = session.resume_id
+            
+            # Step 2: Fetch question pool
+            from sqlalchemy import case, func
+            difficulty_order = case(
+                (models.Question.difficulty == 'easy', 1),
+                (models.Question.difficulty == 'medium', 2),
+                (models.Question.difficulty == 'hard', 3),
+                else_=4
+            )
+            pool = db.query(models.Question).filter(
+                func.lower(models.Question.role) == func.lower(role_from_session),
+                func.lower(models.Question.domain) == func.lower(topic_from_session)
+            ).order_by(difficulty_order).limit(20).all()
+            
+            # Step 3: Select exactly 5 questions
+            selected_qs = []
+            
+            easy_qs = [q for q in pool if (q.difficulty or '').lower() == 'easy']
+            for q in easy_qs[:2]:
+                selected_qs.append(q)
+                if q in pool: pool.remove(q)
+                
+            medium_qs = [q for q in pool if (q.difficulty or '').lower() == 'medium']
+            if medium_qs:
+                selected_qs.append(medium_qs[0])
+                if medium_qs[0] in pool: pool.remove(medium_qs[0])
+                
+            adaptive_qs = []
+            if resume_id:
+                resume = db.query(models.Resume).filter(models.Resume.id == resume_id).first()
+                if resume and resume.skills:
+                    skills = [s.strip().lower() for s in resume.skills.split(',') if s.strip()]
+                    if skills:
+                        for q in list(pool):
+                            q_text_lower = (q.text or "").lower()
+                            if any(skill in q_text_lower for skill in skills):
+                                adaptive_qs.append(q)
+                                pool.remove(q)
+                                if len(adaptive_qs) == 2:
+                                    break
+                                    
+            remaining = 2 - len(adaptive_qs)
+            if remaining > 0:
+                for q in list(pool):
+                    if (q.difficulty or '').lower() in ['medium', 'hard']:
+                        adaptive_qs.append(q)
+                        pool.remove(q)
+                        remaining -= 1
+                        if remaining == 0:
+                            break
+                            
+            selected_qs.extend(adaptive_qs)
+            
+            # Step 4: Generate missing using Groq
+            missing_count = 5 - len(selected_qs)
+            if missing_count > 0:
+                try:
+                    import os, json
+                    from groq import Groq
+                    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+                    prompt = f"You are an expert technical interviewer.\nGenerate EXACTLY {missing_count} short interview questions for a {difficulty_from_session} level {role_from_session} interview.\nThe topic/domain is: {topic_from_session}.\nReturn ONLY valid JSON with a key 'questions' containing a list of strings."
+                    resp = client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": "system", "content": prompt}],
+                        temperature=0.7,
+                        response_format={"type": "json_object"}
+                    )
+                    gen_data = json.loads(resp.choices[0].message.content)
+                    new_texts = gen_data.get("questions", [])
+                    
+                    for text in new_texts[:missing_count]:
+                        new_q = models.Question(
+                            text=text,
+                            type='topic',
+                            difficulty=difficulty_from_session,
+                            role=role_from_session,
+                            domain=topic_from_session,
+                            is_company_question=False,
+                            frequency_score=1
+                        )
+                        db.add(new_q)
+                        db.commit()
+                        db.refresh(new_q)
+                        selected_qs.append(new_q)
+                except Exception as e:
+                    print("Auto-generate missing questions failed:", e)
+            
+            # Step 5: INSERT into session_questions
+            for idx, q in enumerate(selected_qs[:5]):
+                sq = models.SessionQuestion(
+                    session_id=session.id,
+                    question_id=q.id,
+                    question_order=idx + 1,
+                    answer_text=None,
+                    score=None,
+                    ai_feedback=None,
+                    is_skipped=False
+                )
+                db.add(sq)
+            db.commit()
+        # --- END NEW LOGIC ---
+
         return {
             "success": True,
             "Pyspace_interview_url": full_streamlit_url
