@@ -1366,36 +1366,32 @@ def confirm_start(
             if exclude_ids:
                 base_query = base_query.filter(models.Question.id.notin_(exclude_ids))
             
-            # 1. Exact match (difficulty, role, topic/domain, type)
+            # 1. Exact match (difficulty, role, type)
             query = base_query.filter(
                 models.Question.difficulty == difficulty,
-                models.func.lower(models.Question.role) == models.func.lower(role),
-                models.func.lower(models.Question.domain) == models.func.lower(session.topic)
+                models.func.lower(models.Question.role) == models.func.lower(role)
             )
             if q_type:
                 query = query.filter(models.Question.type == q_type)
             q_obj = query.order_by(models.func.random()).first()
             
-            # 2. Fallback: ignore type, but keep topic/domain
+            # 2. Fallback: ignore type
             if not q_obj:
                 q_obj = base_query.filter(
                     models.Question.difficulty == difficulty,
-                    models.func.lower(models.Question.role) == models.func.lower(role),
-                    models.func.lower(models.Question.domain) == models.func.lower(session.topic)
+                    models.func.lower(models.Question.role) == models.func.lower(role)
                 ).order_by(models.func.random()).first()
                 
-            # 3. Fallback: ignore difficulty, but keep topic/domain
+            # 3. Fallback: ignore difficulty
             if not q_obj:
                 q_obj = base_query.filter(
-                    models.func.lower(models.Question.role) == models.func.lower(role),
-                    models.func.lower(models.Question.domain) == models.func.lower(session.topic)
+                    models.func.lower(models.Question.role) == models.func.lower(role)
                 ).order_by(models.func.random()).first()
                 
-            # 4. Fallback: ignore domain, just match role and search text
+            # 4. Fallback: Search for the topic inside the question text or domain
             if not q_obj:
                 from sqlalchemy import or_
                 q_obj = base_query.filter(
-                    models.func.lower(models.Question.role) == models.func.lower(role),
                     or_(
                         models.func.lower(models.Question.domain) == models.func.lower(session.topic),
                         models.Question.text.ilike(f"%{session.topic}%")
@@ -1705,12 +1701,7 @@ def launch_and_confirm_interview(
         signed_session_id = auth.create_access_token({
             "session_id": session.id,
             "userid": str(userid),
-            "token": token,
-            "duration_minutes": session.duration_minutes,
-            "total_questions": session.total_questions,
-            "ai_greeting": ai_greeting,
-            "questions_list": questions_list,
-            "conversation_history": conversation_history
+            "token": token
         })
         
         full_streamlit_url = f"{base}?session_id={signed_session_id}"
