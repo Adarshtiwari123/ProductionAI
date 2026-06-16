@@ -1460,11 +1460,9 @@ Return ONLY valid JSON with a single key "text" containing the question string."
 
     q1 = fetch_question('easy', 'resume')
     q2 = fetch_question('easy', 'topic')
-    q3 = fetch_question('medium', 'resume')
-    q4 = fetch_question('medium', 'topic')
-    q5 = fetch_question('hard', None)
+    q3 = fetch_question('medium', 'topic') # Fallback to topic if resume fails
 
-    fetched_qs = [q1, q2, q3, q4, q5]
+    fetched_qs = [q1, q2, q3]
     if any(q is None for q in fetched_qs):
         return {"success": False, "error": "No questions available for this role yet"}
 
@@ -1497,7 +1495,7 @@ Return ONLY valid JSON with a single key "text" containing the question string."
     # FIX 5, 8 & 1 — Combined single AI call for personalization and tips
     personalized_q1 = q1.text
     personalized_q3 = q3.text
-    tips = ["Provide a clear explanation.", "Focus on key concepts.", "Relate this to your experience.", "Use structured reasoning.", "Explain your logic step-by-step."]
+    tips = ["Provide a clear explanation.", "Focus on key concepts.", "Relate this to your experience."]
 
     if not resume_ctx.is_empty:
         try:
@@ -1514,19 +1512,17 @@ Questions:
 Q1: {q1.text}
 Q2: {q2.text}
 Q3: {q3.text}
-Q4: {q4.text}
-Q5: {q5.text}
 
 Rules:
 1. Rewrite Q3 to mention ONE specific project/achievement name
 2. If no projects exist (e.g. HR/Marketing role), rewrite Q3 to mention a specific skill or domain instead
 3. Keep same difficulty and intent
 4. Maximum 1 sentence for the rewritten question
-5. Provide a 1-line answering tip for EACH of the 5 questions.
+5. Provide a 1-line answering tip for EACH of the 3 questions.
 6. Return ONLY this JSON:
 {{
   "personalized": {{"q3": "rewritten question here"}},
-  "tips": ["tip1", "tip2", "tip3", "tip4", "tip5"]
+  "tips": ["tip1", "tip2", "tip3"]
 }}"""
             
             response = client.chat.completions.create(
@@ -1544,12 +1540,12 @@ Rules:
             ai_data = json.loads(resp_text)
             if "personalized" in ai_data:
                 personalized_q3 = ai_data["personalized"].get("q3", q3.text)
-            if "tips" in ai_data and len(ai_data["tips"]) == 5:
+            if "tips" in ai_data and len(ai_data["tips"]) == 3:
                 tips = ai_data["tips"]
         except Exception as e:
             print("AI personalization failed:", e)
 
-    final_questions_text = [personalized_q1, q2.text, personalized_q3, q4.text, q5.text]
+    final_questions_text = [personalized_q1, q2.text, personalized_q3]
 
     # Save to Session_Questions table
     db.query(models.SessionQuestion).filter(models.SessionQuestion.session_id == session.id).delete()
@@ -1578,7 +1574,7 @@ Rules:
         first_skill = skill_list[0].strip() if skill_list and skill_list[0] != "Not provided" else session.topic
         project_mention = f"I can see your background in {first_skill}"
 
-    ai_greeting = f"Hello {first_name}! Welcome to your {normalized_role} interview. {project_mention} — let us see how deep your knowledge goes today. We will focus on {session.topic}. I will ask you 5 questions and give you feedback after each answer. Let us begin. {personalized_q1}"
+    ai_greeting = f"Hello {first_name}! Welcome to your {normalized_role} interview. {project_mention} — let us see how deep your knowledge goes today. We will focus on {session.topic}. I will ask you {session.total_questions} questions and give you feedback after each answer. Let us begin. {personalized_q1}"
 
     # FIX 7 — Enhanced system prompt
     system_prompt = f"""You are a strict MNC technical interviewer at a top company conducting a real {normalized_role} interview.
@@ -1599,7 +1595,7 @@ Your Behavior Rules:
 - Stay in interviewer character throughout
 - Topic focus: {session.topic}
 - Difficulty: {session.difficulty}
-- Total questions: 5"""
+- Total questions: {session.total_questions}"""
 
     conversation_history = [
         {"role": "system", "content": system_prompt},
@@ -1628,20 +1624,6 @@ Your Behavior Rules:
             "difficulty": "medium",
             "resume_based": True,
             "tip": tips[2]
-        },
-        {
-            "order": 4,
-            "question": q4.text,
-            "difficulty": "medium",
-            "resume_based": False,
-            "tip": tips[3]
-        },
-        {
-            "order": 5,
-            "question": q5.text,
-            "difficulty": "hard",
-            "resume_based": False,
-            "tip": tips[4]
         }
     ]
 
@@ -1810,14 +1792,78 @@ def submit_answer(
     history.append({"role": "user", "content": user_msg})
     next_q_num = payload.question_number + 1
     interview_complete = next_q_num > session.total_questions
-    # Fetch the exact next question from Session_Questions (if interview is not complete)
+    # Fetch or generate the exact next question from Session_Questions (if interview is not complete)
     next_question_text = ""
     if not interview_complete:
-        next_sq = db.query(models.SessionQuestion).filter(
-            models.SessionQuestion.session_id == session.id,
-            models.SessionQuestion.question_order == next_q_num
-        ).first()
-        next_question_text = next_sq.question.text if next_sq and next_sq.question else "Can you elaborate further?"
+        if next_q_num <= 3:
+            next_sq = db.query(models.SessionQuestion).filter(
+                models.SessionQuestion.session_id == session.id,
+                models.SessionQuestion.question_order == next_q_num
+            ).first()
+            next_question_text = next_sq.question.text if next_sq and next_sq.question else "Can you elaborate further?"
+        else:
+            # Generate adaptive question!
+            try:
+                import json
+                import os
+                from groq import Groq
+                
+                groq_api_key = os.getenv("GROQ_API_KEY")
+                client = Groq(api_key=groq_api_key)
+                
+                # Fetch recent history
+                recent_history = payload.conversation_history[-4:]
+                history_text = "\\n".join([f"{msg['role']}: {msg['content']}" for msg in recent_history])
+                
+                adaptive_prompt = f"""You are an expert technical interviewer conducting a {session.difficulty} interview for a {session.role}.
+Topic: {session.topic}
+
+Based on the recent conversation:
+{history_text}
+
+Generate ONE short, adaptive follow-up interview question (max 15 words).
+- If the user answered well, make it slightly harder or deeper.
+- If the user struggled, ask a simpler fundamental question related to {session.topic}.
+- NEVER ask them to write code.
+Return ONLY valid JSON with the key "question"."""
+                
+                resp = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "system", "content": adaptive_prompt}],
+                    temperature=0.7,
+                    response_format={"type": "json_object"}
+                )
+                ai_data = json.loads(resp.choices[0].message.content)
+                next_question_text = ai_data.get("question", f"Can you elaborate on your experience with {session.topic}?")
+                
+                # Save dynamically generated question to questions table
+                new_q = models.Question(
+                    text=next_question_text,
+                    type='topic',
+                    difficulty=session.difficulty,
+                    role=session.role,
+                    domain=session.topic,
+                    is_company_question=False,
+                    frequency_score=1
+                )
+                db.add(new_q)
+                db.flush()
+                
+                # Save to session_questions
+                sq = models.SessionQuestion(
+                    session_id=session.id,
+                    question_id=new_q.id,
+                    question_order=next_q_num,
+                    answer_text=None,
+                    score=None,
+                    ai_feedback=None,
+                    is_skipped=False
+                )
+                db.add(sq)
+                db.commit()
+            except Exception as e:
+                print("Failed to generate adaptive question:", e)
+                next_question_text = f"Can you tell me more about your experience with {session.topic}?"
     # Evaluate using Groq LLM
     try:
         import json
