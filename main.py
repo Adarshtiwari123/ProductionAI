@@ -819,7 +819,7 @@ def get_payments(
 DURATION_CREDIT_MAP = {
     5:  1,
     10: 2,
-    15: 4
+    20: 4
 }
 
 @app.post("/validate-access", response_model=schemas.ValidateAccessResponse,
@@ -832,9 +832,9 @@ def validate_access(
     """
     Validates if a user can start an interview with the selected duration.
     """
-    allowed_durations = [5, 10, 15]
+    allowed_durations = [5, 10, 20]
     if payload.duration_minutes not in allowed_durations:
-        raise HTTPException(status_code=400, detail="Invalid duration. Must be 5, 10, or 15.")
+        raise HTTPException(status_code=400, detail="Invalid duration. Must be 5, 10, or 20.")
 
     required_credits = DURATION_CREDIT_MAP[payload.duration_minutes]
 
@@ -1001,8 +1001,8 @@ def validate_and_setup_interview(
     # Validation: Enum checks
     if payload.difficulty not in ['easy', 'medium', 'hard']:
         raise HTTPException(status_code=400, detail="Invalid difficulty level")
-    if payload.duration_minutes not in [5, 10, 15]:
-        raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 5, 10, 15")
+    if payload.duration_minutes not in [5, 10, 20]:
+        raise HTTPException(status_code=400, detail="Invalid duration. Allowed: 5, 10, 20")
         
     if current_user.tier == "free" and payload.duration_minutes > 5:
         raise HTTPException(status_code=403, detail="Free plan allows maximum 5 minute interviews only")
@@ -1036,8 +1036,10 @@ def validate_and_setup_interview(
             )
 
         # STEP 2 - Calculate total_questions
-        duration_map = {5: 5, 10: 5, 20: 10, 40: 20}
-        total_questions = duration_map.get(payload.duration_minutes, 10)
+        duration_question_map = {5: 3, 10: 5, 20: 10}
+        if payload.duration_minutes not in duration_question_map:
+            raise HTTPException(status_code=400, detail=f"Invalid duration: {payload.duration_minutes} minutes")
+        total_questions = duration_question_map[payload.duration_minutes]
 
         # STEP 3 - Check if user has uploaded resume
         resume = db.query(models.Resume).filter(
@@ -1105,88 +1107,88 @@ def validate_and_setup_interview(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/interview/change-setup", response_model=schemas.InterviewChangeSetupResponse, summary="Cancel an interview setup and refund credits")
-def change_interview_setup(
-    payload: schemas.InterviewChangeSetupRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """
-    Handles cancelling an interview session setup and refunding the credits.
-    1. Fetches the session to determine duration.
-    2. Calculates the refund amount.
-    3. Updates the Usage_Tracker to restore credits and decrement session count.
-    4. Marks the session as abandoned.
-    """
-    from datetime import datetime
-
-    try:
-        # STEP 1 - Get the session to find duration
-        session = db.query(models.InterviewSession).filter(
-            models.InterviewSession.id == payload.session_id,
-            models.InterviewSession.user_id == current_user.id
-        ).first()
-
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        if session.status != 'active':
-            raise HTTPException(status_code=400, detail="Session cannot be cancelled in its current state")
-
-        if session.started_at is not None:
-            raise HTTPException(status_code=400, detail="Cannot cancel a session that has already started")
-
-        # STEP 2 - Calculate cost to refund
-        duration = session.duration_minutes
-        if duration == 10:
-            refund = 1
-        elif duration == 20:
-            refund = 2
-        elif duration == 40:
-            refund = 4
-        else:
-            refund = 0
-
-        # STEP 3 - Roll back credits in Usage_Tracker
-        today = datetime.utcnow().date()
-        usage = db.query(models.UsageTracker).filter(
-            models.UsageTracker.user_id == current_user.id,
-            models.UsageTracker.period_end >= today
-        ).order_by(models.UsageTracker.id.desc()).first()
-
-        if not usage:
-            raise HTTPException(status_code=403, detail="No active usage record found for refund.")
-
-        usage.credits_used = max(usage.credits_used - refund, 0)
-        usage.credits_remaining = usage.credits_remaining + refund
-        usage.sessions_used = max(usage.sessions_used - 1, 0)
-        usage.updated_at = datetime.utcnow()
-
-        # Update session status to prevent further refunds or starting the session
-        session.status = 'abandoned'
-
-        db.query(models.User).filter(
-            models.User.id == current_user.id
-        ).update({
-            "interview_limit": usage.credits_remaining
-        })
-
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Session setup cancelled and credits refunded.",
-            "session_id": session.id,
-            "credits_refunded": refund,
-            "credits_remaining": usage.credits_remaining
-        }
-
-    except HTTPException as he:
-        db.rollback()
-        raise he
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.post("/interview/change-setup", response_model=schemas.InterviewChangeSetupResponse, summary="Cancel an interview setup and refund credits")
+# def change_interview_setup(
+#     payload: schemas.InterviewChangeSetupRequest,
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(get_current_user)
+# ):
+#     """
+#     Handles cancelling an interview session setup and refunding the credits.
+#     1. Fetches the session to determine duration.
+#     2. Calculates the refund amount.
+#     3. Updates the Usage_Tracker to restore credits and decrement session count.
+#     4. Marks the session as abandoned.
+#     """
+#     from datetime import datetime
+# 
+#     try:
+#         # STEP 1 - Get the session to find duration
+#         session = db.query(models.InterviewSession).filter(
+#             models.InterviewSession.id == payload.session_id,
+#             models.InterviewSession.user_id == current_user.id
+#         ).first()
+# 
+#         if not session:
+#             raise HTTPException(status_code=404, detail="Session not found")
+# 
+#         if session.status != 'active':
+#             raise HTTPException(status_code=400, detail="Session cannot be cancelled in its current state")
+# 
+#         if session.started_at is not None:
+#             raise HTTPException(status_code=400, detail="Cannot cancel a session that has already started")
+# 
+#         # STEP 2 - Calculate cost to refund
+#         duration = session.duration_minutes
+#         if duration == 10:
+#             refund = 1
+#         elif duration == 20:
+#             refund = 2
+#         elif duration == 40:
+#             refund = 4
+#         else:
+#             refund = 0
+# 
+#         # STEP 3 - Roll back credits in Usage_Tracker
+#         today = datetime.utcnow().date()
+#         usage = db.query(models.UsageTracker).filter(
+#             models.UsageTracker.user_id == current_user.id,
+#             models.UsageTracker.period_end >= today
+#         ).order_by(models.UsageTracker.id.desc()).first()
+# 
+#         if not usage:
+#             raise HTTPException(status_code=403, detail="No active usage record found for refund.")
+# 
+#         usage.credits_used = max(usage.credits_used - refund, 0)
+#         usage.credits_remaining = usage.credits_remaining + refund
+#         usage.sessions_used = max(usage.sessions_used - 1, 0)
+#         usage.updated_at = datetime.utcnow()
+# 
+#         # Update session status to prevent further refunds or starting the session
+#         session.status = 'abandoned'
+# 
+#         db.query(models.User).filter(
+#             models.User.id == current_user.id
+#         ).update({
+#             "interview_limit": usage.credits_remaining
+#         })
+# 
+#         db.commit()
+# 
+#         return {
+#             "success": True,
+#             "message": "Session setup cancelled and credits refunded.",
+#             "session_id": session.id,
+#             "credits_refunded": refund,
+#             "credits_remaining": usage.credits_remaining
+#         }
+# 
+#     except HTTPException as he:
+#         db.rollback()
+#         raise he
+#     except Exception as e:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/interview/session-summary", response_model=schemas.InterviewSessionSummaryResponse, summary="Get session details for confirmation screen")
@@ -1253,387 +1255,385 @@ def get_session_summary(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/interview/confirm-start", response_model=schemas.ConfirmStartResponse, summary="Confirm start of interview and fetch questions")
-def confirm_start(
-    payload: schemas.ConfirmStartRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    from datetime import datetime
-    import random
-
-    if payload.userid != current_user.id:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
-
-    actual_session_id = payload.session_id
-    if isinstance(actual_session_id, str):
-        try:
-            token_data = auth.decode_token(actual_session_id)
-            actual_session_id = token_data.get("session_id")
-        except Exception:
-            pass
-    session = db.query(models.InterviewSession).filter(
-        models.InterviewSession.id == actual_session_id,
-        models.InterviewSession.user_id == payload.userid
-    ).first()
-
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    if session.started_at is None:
-        session.started_at = datetime.utcnow()
-        db.commit()
-    
-    # STEP 2 - Fetch resume context from user_profile
-    resume_context = ""
-    if session.resume_id:
-        profiles = db.query(models.UserProfile).join(models.Attribute).filter(
-            models.UserProfile.user_id == session.user_id,
-            models.UserProfile.resume_id == session.resume_id,
-            models.Attribute.code.in_([
-                'technical_skills', 'skills', 'projects', 
-                'experience', 'education', 'project_details',
-                'professional_experience', 'achievements', 'key_results'
-            ])
-        ).all()
-        
-        context_parts = []
-        resume_skills = []
-        resume_projects = []
-        resume_experience = []
-        resume_education = []
-        for p in profiles:
-            if p.value and p.value.strip():
-                context_parts.append(f"{p.attribute.name}: {p.value}")
-                if p.attribute.code in ['technical_skills', 'skills']:
-                    resume_skills.append(p.value)
-                elif p.attribute.code in ['projects', 'project_details', 'achievements', 'key_results']:
-                    resume_projects.append(p.value)
-                elif p.attribute.code in ['experience', 'professional_experience']:
-                    resume_experience.append(p.value)
-                elif p.attribute.code in ['education']:
-                    resume_education.append(p.value)
-        resume_context = "\n".join(context_parts)
-
-    class ResumeContext:
-        def __init__(self, s, p, e, ed):
-            self.skills = "\n".join(s) if s else "Not provided"
-            self.projects = "\n".join(p) if p else "Not provided"
-            self.experience = "\n".join(e) if e else "Not provided"
-            self.education = "\n".join(ed) if ed else "Not provided"
-            self.is_empty = not (s or p or e or ed)
-
-    resume_ctx = ResumeContext(resume_skills, resume_projects, resume_experience, resume_education)
-
-    # FIX 1 — Role matching for ALL roles
-    role_mapping = {
-        "frontend": "Frontend Developer",
-        "frontend developer": "Frontend Developer",
-        "backend": "Backend Developer",
-        "backend developer": "Backend Developer",
-        "full stack": "Full Stack Developer",
-        "fullstack": "Full Stack Developer",
-        "full stack developer": "Full Stack Developer",
-        "data analyst": "Data Analyst",
-        "analyst": "Data Analyst",
-        "hr": "HR Manager",
-        "hr manager": "HR Manager",
-        "human resources": "HR Manager",
-        "marketing": "Marketing Analyst",
-        "marketing analyst": "Marketing Analyst",
-        "software engineer": "Software Engineer",
-        "engineer": "Software Engineer"
-    }
-    normalized_role = role_mapping.get(session.role.lower(), session.role)
-
-    # FIX 2 — No-repeat across all sessions
-    used_question_ids = []
-    
-    previously_used = db.query(models.SessionQuestion.question_id).join(
-        models.InterviewSession, 
-        models.SessionQuestion.session_id == models.InterviewSession.id
-    ).filter(
-        models.InterviewSession.user_id == current_user.id
-    ).all()
-    
-    for q_id in previously_used:
-        used_question_ids.append(q_id[0])
-
-    def fetch_question(difficulty, q_type=None, role=normalized_role):
-        def _try_fetch(exclude_ids):
-            base_query = db.query(models.Question)
-            if exclude_ids:
-                base_query = base_query.filter(models.Question.id.notin_(exclude_ids))
-            
-            # 1. Exact match (difficulty, role, type)
-            query = base_query.filter(
-                models.Question.difficulty == difficulty,
-                models.func.lower(models.Question.role) == models.func.lower(role)
-            )
-            if q_type:
-                query = query.filter(models.Question.type == q_type)
-            q_obj = query.order_by(models.func.random()).first()
-            
-            # 2. Fallback: ignore type
-            if not q_obj:
-                q_obj = base_query.filter(
-                    models.Question.difficulty == difficulty,
-                    models.func.lower(models.Question.role) == models.func.lower(role)
-                ).order_by(models.func.random()).first()
-                
-            # 3. Fallback: ignore difficulty
-            if not q_obj:
-                q_obj = base_query.filter(
-                    models.func.lower(models.Question.role) == models.func.lower(role)
-                ).order_by(models.func.random()).first()
-                
-            # 4. Fallback: Search for the topic inside the question text or domain
-            if not q_obj:
-                from sqlalchemy import or_
-                q_obj = base_query.filter(
-                    or_(
-                        models.func.lower(models.Question.domain) == models.func.lower(session.topic),
-                        models.Question.text.ilike(f"%{session.topic}%")
-                    )
-                ).order_by(models.func.random()).first()
-                
-            return q_obj
-        
-        # ALWAYS use the exclude list to prevent duplicates
-        q_obj = _try_fetch(used_question_ids)
-        if q_obj:
-            used_question_ids.append(q_obj.id)
-            return q_obj
-            
-        # If no relevant question exists in the DB, auto-generate one using the LLM and save it!
-        import os
-        import json
-        from groq import Groq
-        try:
-            groq_api_key = os.getenv("GROQ_API_KEY")
-            client = Groq(api_key=groq_api_key)
-            prompt = f"""You are an expert technical interviewer.
-Generate EXACTLY ONE very brief interview question for a {difficulty} level {role} interview.
-The topic/domain is: {session.topic}.
-Type requested: {q_type}
-
-Rules:
-1. The question MUST perfectly match the '{difficulty}' difficulty. An 'easy' question must be simple and fundamental.
-2. The question MUST be short and conversational (maximum 15 words). DO NOT write complex scenarios.
-3. If type is 'resume', ask a simple experience-based question. If 'design', a simple architecture question. If 'behavioural', a simple behavioral question.
-4. NEVER ask the candidate to write code, scripts, or queries. All questions must focus entirely on theory, concepts, or past experience.
-
-Return ONLY valid JSON with a single key "text" containing the question string."""
-
-            resp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "system", "content": prompt}],
-                temperature=0.7,
-                response_format={"type": "json_object"}
-            )
-            
-            gen_data = json.loads(resp.choices[0].message.content)
-            new_text = gen_data.get("text", f"Can you explain your experience with {session.topic}?")
-            
-            # Map type safely
-            safe_type = q_type if q_type in ['topic', 'resume', 'behavioural', 'design'] else 'topic'
-            
-            new_q = models.Question(
-                text=new_text,
-                type=safe_type,
-                difficulty=difficulty,
-                role=role,
-                domain=session.topic,
-                is_company_question=False,
-                frequency_score=1
-            )
-            db.add(new_q)
-            db.commit()
-            db.refresh(new_q)
-            
-            used_question_ids.append(new_q.id)
-            return new_q
-        except Exception as e:
-            print("Auto-generate question failed:", e)
-            return None
-
-    q1 = fetch_question('easy', 'resume')
-    q2 = fetch_question('easy', 'topic')
-    q3 = fetch_question('medium', 'topic') # Fallback to topic if resume fails
-
-    fetched_qs = [q1, q2, q3]
-    if any(q is None for q in fetched_qs):
-        return {"success": False, "error": "No questions available for this role yet"}
-
-    # FIX 3 — Project name extraction
-    def extract_project_names(projects_text):
-        lines = projects_text.split('\n')
-        p_names = []
-        for line in lines:
-            line = line.strip()
-            if '|' in line:
-                name = line.split('|')[0].strip()
-                if len(name) > 3:
-                    p_names.append(name)
-            elif ' - ' in line and len(line) < 60:
-                name = line.split(' - ')[0].strip()
-                if len(name) > 3:
-                    p_names.append(name)
-        return p_names[:3]
-
-    project_names = extract_project_names(resume_ctx.projects)
-
-    # FIX 4 — Experience field
-    if resume_ctx.experience.strip() and resume_ctx.experience != "Not provided":
-        experience_context = resume_ctx.experience
-    elif resume_ctx.education.strip() and resume_ctx.education != "Not provided":
-        experience_context = resume_ctx.education
-    else:
-        experience_context = "Fresher / Entry Level"
-
-    # FIX 5, 8 & 1 — Combined single AI call for personalization and tips
-    personalized_q1 = q1.text
-    personalized_q3 = q3.text
-    tips = ["Provide a clear explanation.", "Focus on key concepts.", "Relate this to your experience."]
-
-    if not resume_ctx.is_empty:
-        try:
-            groq_api_key = os.getenv("GROQ_API_KEY")
-            client = Groq(api_key=groq_api_key)
-            
-            prompt_sys = "You are an expert interview question personalizer and coach. Return ONLY valid JSON. No markdown formatting, no backticks, no explanation."
-            prompt_user = f"""Candidate profile:
-- Role applying for: {normalized_role}
-- Skills: {resume_ctx.skills}
-- Projects/Achievements: {', '.join(project_names) if project_names else 'None'}
-
-Questions:
-Q1: {q1.text}
-Q2: {q2.text}
-Q3: {q3.text}
-
-Rules:
-1. Rewrite Q3 to mention ONE specific project/achievement name
-2. If no projects exist (e.g. HR/Marketing role), rewrite Q3 to mention a specific skill or domain instead
-3. Keep same difficulty and intent
-4. Maximum 1 sentence for the rewritten question
-5. Provide a 1-line answering tip for EACH of the 3 questions.
-6. Return ONLY this JSON:
-{{
-  "personalized": {{"q3": "rewritten question here"}},
-  "tips": ["tip1", "tip2", "tip3"]
-}}"""
-            
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": prompt_sys},
-                    {"role": "user", "content": prompt_user}
-                ],
-                temperature=0.3,
-                max_tokens=1000,
-                response_format={"type": "json_object"}
-            )
-            resp_text = response.choices[0].message.content.strip()
-            
-            ai_data = json.loads(resp_text)
-            if "personalized" in ai_data:
-                personalized_q3 = ai_data["personalized"].get("q3", q3.text)
-            if "tips" in ai_data and len(ai_data["tips"]) == 3:
-                tips = ai_data["tips"]
-        except Exception as e:
-            print("AI personalization failed:", e)
-
-    final_questions_text = [personalized_q1, q2.text, personalized_q3]
-
-    # Save to Session_Questions table
-    db.query(models.SessionQuestion).filter(models.SessionQuestion.session_id == session.id).delete()
-    for idx, (q_obj, q_txt) in enumerate(zip(fetched_qs, final_questions_text)):
-        if q_obj:
-            sq = models.SessionQuestion(
-                session_id=session.id,
-                question_id=q_obj.id,
-                question_order=idx + 1,
-                answer_text=None,
-                score=None,
-                ai_feedback=None,
-                is_skipped=False
-            )
-            db.add(sq)
-    db.commit()
-
-    # FIX 6 — Enhanced ai_greeting
-    has_projects = len(project_names) > 0
-    first_name = current_user.name.split(' ')[0]
-
-    if has_projects:
-        project_mention = f"I can see you have worked on {' and '.join(project_names[:2])}"
-    else:
-        skill_list = resume_ctx.skills.split(',')
-        first_skill = skill_list[0].strip() if skill_list and skill_list[0] != "Not provided" else session.topic
-        project_mention = f"I can see your background in {first_skill}"
-
-    ai_greeting = f"Hello {first_name}! Welcome to your {normalized_role} interview. {project_mention} — let us see how deep your knowledge goes today. We will focus on {session.topic}. I will ask you {session.total_questions} questions and give you feedback after each answer. Let us begin. {personalized_q1}"
-
-    # FIX 7 — Enhanced system prompt
-    system_prompt = f"""You are a strict MNC technical interviewer at a top company conducting a real {normalized_role} interview.
-
-Candidate Profile:
-- Name: {current_user.name}
-- Skills: {resume_ctx.skills}
-- Projects/Work: {', '.join(project_names) if project_names else 'None provided'}
-- Background: {experience_context}
-
-Your Behavior Rules:
-- Ask exactly ONE question at a time
-- After candidate answers, give 1-2 line feedback
-- Use words like 'Good point' or 'That needs more depth'
-- Never reveal the score
-- If answer is too short, say 'Can you elaborate further?'
-- If answer is wrong, say 'Not quite — think about it from a {session.topic} perspective'
-- Stay in interviewer character throughout
-- Topic focus: {session.topic}
-- Difficulty: {session.difficulty}
-- Total questions: {session.total_questions}"""
-
-    conversation_history = [
-        {"role": "system", "content": system_prompt},
-        {"role": "assistant", "content": ai_greeting}
-    ]
-
-    # FIX 8 — Enhanced questions_list format
-    questions_list = [
-        {
-            "order": 1,
-            "question": personalized_q1,
-            "difficulty": "easy",
-            "resume_based": True,
-            "tip": tips[0]
-        },
-        {
-            "order": 2,
-            "question": q2.text,
-            "difficulty": "easy", 
-            "resume_based": False,
-            "tip": tips[1]
-        },
-        {
-            "order": 3,
-            "question": personalized_q3,
-            "difficulty": "medium",
-            "resume_based": True,
-            "tip": tips[2]
-        }
-    ]
-
-    return {
-        "success": True,
-        "enhanced": True,
-        "questions_list": questions_list,
-        "ai_greeting": ai_greeting,
-        "conversation_history": conversation_history
-    }
+# @app.post("/api/interview/confirm-start", response_model=schemas.ConfirmStartResponse, summary="Confirm start of interview and fetch questions")
+# def confirm_start(
+#     payload: schemas.ConfirmStartRequest,
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(get_current_user)
+# ):
+#     from datetime import datetime
+#     import random
+# 
+#     if payload.userid != current_user.id:
+#         raise HTTPException(status_code=403, detail="Unauthorized")
+# 
+# 
+#     actual_session_id = payload.session_id
+#     if isinstance(actual_session_id, str):
+#         try:
+#             token_data = auth.decode_token(actual_session_id)
+#             actual_session_id = token_data.get("session_id")
+#         except Exception:
+#             pass
+#     session = db.query(models.InterviewSession).filter(
+#         models.InterviewSession.id == actual_session_id,
+#         models.InterviewSession.user_id == payload.userid
+#     ).first()
+# 
+#     if not session:
+#         raise HTTPException(status_code=404, detail="Session not found")
+# 
+#     if session.started_at is None:
+#         session.started_at = datetime.utcnow()
+#         db.commit()
+#     
+#     # STEP 2 - Fetch resume context from user_profile
+#     resume_context = ""
+#     if session.resume_id:
+#         profiles = db.query(models.UserProfile).join(models.Attribute).filter(
+#             models.UserProfile.user_id == session.user_id,
+#             models.UserProfile.resume_id == session.resume_id,
+#             models.Attribute.code.in_([
+#                 'technical_skills', 'skills', 'projects', 
+#                 'experience', 'education', 'project_details',
+#                 'professional_experience', 'achievements', 'key_results'
+#             ])
+#         ).all()
+#         
+#         context_parts = []
+#         resume_skills = []
+#         resume_projects = []
+#         resume_experience = []
+#         resume_education = []
+#         for p in profiles:
+#             if p.value and p.value.strip():
+#                 context_parts.append(f"{p.attribute.name}: {p.value}")
+#                 if p.attribute.code in ['technical_skills', 'skills']:
+#                     resume_skills.append(p.value)
+#                 elif p.attribute.code in ['projects', 'project_details', 'achievements', 'key_results']:
+#                     resume_projects.append(p.value)
+#                 elif p.attribute.code in ['experience', 'professional_experience']:
+#                     resume_experience.append(p.value)
+#                 elif p.attribute.code in ['education']:
+#                     resume_education.append(p.value)
+#         resume_context = "\n".join(context_parts)
+# 
+#     class ResumeContext:
+#         def __init__(self, s, p, e, ed):
+#             self.skills = "\n".join(s) if s else "Not provided"
+#             self.projects = "\n".join(p) if p else "Not provided"
+#             self.experience = "\n".join(e) if e else "Not provided"
+#             self.education = "\n".join(ed) if ed else "Not provided"
+#             self.is_empty = not (s or p or e or ed)
+# 
+#     resume_ctx = ResumeContext(resume_skills, resume_projects, resume_experience, resume_education)
+# 
+#     # FIX 1 — Role matching for ALL roles
+#     role_mapping = {
+#         "frontend": "Frontend Developer",
+#         "frontend developer": "Frontend Developer",
+#         "backend": "Backend Developer",
+#         "backend developer": "Backend Developer",
+#         "full stack": "Full Stack Developer",
+#         "fullstack": "Full Stack Developer",
+#         "full stack developer": "Full Stack Developer",
+#         "data analyst": "Data Analyst",
+#         "analyst": "Data Analyst",
+#         "hr": "HR Manager",
+#         "hr manager": "HR Manager",
+#         "human resources": "HR Manager",
+#         "marketing": "Marketing Analyst",
+#         "marketing analyst": "Marketing Analyst",
+#         "software engineer": "Software Engineer",
+#         "engineer": "Software Engineer"
+#     }
+#     normalized_role = role_mapping.get(session.role.lower(), session.role)
+# 
+#     # FIX 2 — No-repeat across all sessions
+#     used_question_ids = []
+#     
+#     previously_used = db.query(models.SessionQuestion.question_id).join(
+#         models.InterviewSession, 
+#         models.SessionQuestion.session_id == models.InterviewSession.id
+#     ).filter(
+#         models.InterviewSession.user_id == current_user.id
+#     ).all()
+#     
+#     for q_id in previously_used:
+#         used_question_ids.append(q_id[0])
+# 
+#     def fetch_question(difficulty, q_type=None, role=normalized_role):
+#         def _try_fetch(exclude_ids):
+#             base_query = db.query(models.Question)
+#             if exclude_ids:
+#                 base_query = base_query.filter(models.Question.id.notin_(exclude_ids))
+#             
+#             # 1. Exact match (difficulty, role, type)
+#             query = base_query.filter(
+#                 models.Question.difficulty == difficulty,
+#                 models.func.lower(models.Question.role) == models.func.lower(role)
+#             )
+#             if q_type:
+#                 query = query.filter(models.Question.type == q_type)
+#             q_obj = query.order_by(models.func.random()).first()
+#             
+#             # 2. Fallback: ignore type
+#             if not q_obj:
+#                 q_obj = base_query.filter(
+#                     models.Question.difficulty == difficulty,
+#                     models.func.lower(models.Question.role) == models.func.lower(role)
+#                 ).order_by(models.func.random()).first()
+#                 
+#             # 3. Fallback: ignore difficulty
+#             if not q_obj:
+#                 q_obj = base_query.filter(
+#                     models.func.lower(models.Question.role) == models.func.lower(role)
+#                 ).order_by(models.func.random()).first()
+#                 
+#             # 4. Fallback: Search for the topic inside the question text or domain
+#             if not q_obj:
+#                 from sqlalchemy import or_
+#                 q_obj = base_query.filter(
+#                     or_(
+#                         models.func.lower(models.Question.domain) == models.func.lower(session.topic),
+#                         models.Question.text.ilike(f"%{session.topic}%")
+#                     )
+#                 ).order_by(models.func.random()).first()
+#                 
+#             return q_obj
+#         
+#         # ALWAYS use the exclude list to prevent duplicates
+#         q_obj = _try_fetch(used_question_ids)
+#         if q_obj:
+#             used_question_ids.append(q_obj.id)
+#             return q_obj
+#             
+#         # If no relevant question exists in the DB, auto-generate one using the LLM and save it!
+#         import os
+#         import json
+#         from groq import Groq
+#         try:
+#             groq_api_key = os.getenv("GROQ_API_KEY")
+#             client = Groq(api_key=groq_api_key)
+#             prompt = f"""You are an expert technical interviewer.
+# Generate EXACTLY ONE very brief interview question for a {difficulty} level {role} interview.
+# The topic/domain is: {session.topic}.
+# Type requested: {q_type}
+# 
+# Rules:
+# 1. The question MUST perfectly match the '{difficulty}' difficulty. An 'easy' question must be simple and fundamental.
+# 2. The question MUST be short and conversational (maximum 15 words). DO NOT write complex scenarios.
+# 3. If type is 'resume', ask a simple experience-based question. If 'design', a simple architecture question. If 'behavioural', a simple behavioral question.
+# 4. NEVER ask the candidate to write code, scripts, or queries. All questions must focus entirely on theory, concepts, or past experience.
+# 
+# Return ONLY valid JSON with a single key "text" containing the question string."""
+# 
+#             resp = client.chat.completions.create(
+#                 model="llama-3.3-70b-versatile",
+#                 messages=[{"role": "system", "content": prompt}],
+#                 temperature=0.7,
+#                 response_format={"type": "json_object"}
+#             )
+#             
+#             gen_data = json.loads(resp.choices[0].message.content)
+#             new_text = gen_data.get("text", f"Can you explain your experience with {session.topic}?")
+#             
+#             # Map type safely
+#             safe_type = q_type if q_type in ['topic', 'resume', 'behavioural', 'design'] else 'topic'
+#             
+#             new_q = models.Question(
+#                 text=new_text,
+#                 type=safe_type,
+#                 difficulty=difficulty,
+#                 role=role,
+#                 domain=session.topic,
+#                 is_company_question=False,
+#                 frequency_score=1
+#             )
+#             db.add(new_q)
+#             db.commit()
+#             db.refresh(new_q)
+#             
+#             used_question_ids.append(new_q.id)
+#             return new_q
+#         except Exception as e:
+#             print("Auto-generate question failed:", e)
+#             return None
+# 
+#     q1 = fetch_question('easy', 'resume')
+#     q2 = fetch_question('easy', 'topic')
+#     q3 = fetch_question('medium', 'topic') # Fallback to topic if resume fails
+# 
+#     fetched_qs = [q1, q2, q3]
+#     if any(q is None for q in fetched_qs):
+#         return {"success": False, "error": "No questions available for this role yet"}
+# 
+#     # FIX 3 — Project name extraction
+#     def extract_project_names(projects_text):
+#         lines = projects_text.split('\n')
+#         p_names = []
+#         for line in lines:
+#             line = line.strip()
+#             if '|' in line:
+#                 name = line.split('|')[0].strip()
+#                 if len(name) > 3:
+#                     p_names.append(name)
+#             elif ' - ' in line and len(line) < 60:
+#                 name = line.split(' - ')[0].strip()
+#                 if len(name) > 3:
+#                     p_names.append(name)
+#         return p_names[:3]
+# 
+#     project_names = extract_project_names(resume_ctx.projects)
+# 
+#     # FIX 4 — Experience field
+#     if resume_ctx.experience.strip() and resume_ctx.experience != "Not provided":
+#         experience_context = resume_ctx.experience
+#     elif resume_ctx.education.strip() and resume_ctx.education != "Not provided":
+#         experience_context = resume_ctx.education
+#     else:
+#         experience_context = "Fresher / Entry Level"
+# 
+#     # FIX 5, 8 & 1 — Combined single AI call for personalization and tips
+#     personalized_q1 = q1.text
+#     personalized_q3 = q3.text
+#     tips = ["Provide a clear explanation.", "Focus on key concepts.", "Relate this to your experience."]
+# 
+#     if not resume_ctx.is_empty:
+#         try:
+#             groq_api_key = os.getenv("GROQ_API_KEY")
+#             client = Groq(api_key=groq_api_key)
+#             
+#             prompt_sys = "You are an expert interview question personalizer and coach. Return ONLY valid JSON. No markdown formatting, no backticks, no explanation."
+#             prompt_user = f"""Candidate profile:
+# - Role applying for: {normalized_role}
+# - Skills: {resume_ctx.skills}
+# - Projects/Achievements: {', '.join(project_names) if project_names else 'None'}
+# 
+# Questions:
+# Q1: {q1.text}
+# Q2: {q2.text}
+# Q3: {q3.text}
+# 
+# Rules:
+# 1. Rewrite Q3 to mention ONE specific project/achievement name
+# 2. If no projects exist (e.g. HR/Marketing role), rewrite Q3 to mention a specific skill or domain instead
+# 3. Keep same difficulty and intent
+# 4. Maximum 1 sentence for the rewritten question
+# 5. Provide a 1-line answering tip for EACH of the 3 questions.
+# 6. Return ONLY this JSON:
+# {{
+#   "personalized": {{"q3": "rewritten question here"}},
+#   "tips": ["tip1", "tip2", "tip3"]
+# }}"""
+#             
+#             response = client.chat.completions.create(
+#                 model="llama-3.3-70b-versatile",
+#                 messages=[
+#                     {"role": "system", "content": prompt_sys},
+#                     {"role": "user", "content": prompt_user}
+#                 ],
+#                 temperature=0.3,
+#                 max_tokens=1000,
+#                 response_format={"type": "json_object"}
+#             )
+#             resp_text = response.choices[0].message.content.strip()
+#             
+#             ai_data = json.loads(resp_text)
+#             if "personalized" in ai_data:
+#                 personalized_q3 = ai_data["personalized"].get("q3", q3.text)
+#             if "tips" in ai_data and len(ai_data["tips"]) == 3:
+#                 tips = ai_data["tips"]
+#         except Exception as e:
+#             print("AI personalization failed:", e)
+# 
+#     final_questions_text = [personalized_q1, q2.text, personalized_q3]
+# 
+#     # Save to Session_Questions table
+#     db.query(models.SessionQuestion).filter(models.SessionQuestion.session_id == session.id).delete()
+#     for idx, (q_obj, q_txt) in enumerate(zip(fetched_qs, final_questions_text)):
+#         if q_obj:
+#             sq = models.SessionQuestion(
+#                 session_id=session.id,
+#                 question_id=q_obj.id,
+#                 question_order=idx + 1,
+#                 answer_text=None,
+#                 score=None,
+#                 ai_feedback=None,
+#                 is_skipped=False
+#             )
+#             db.add(sq)
+#     db.commit()
+# 
+#     # FIX 6 — Enhanced ai_greeting
+#     has_projects = len(project_names) > 0
+#     first_name = current_user.name.split(' ')[0]
+# 
+#     if has_projects:
+#         project_mention = f"I can see you have worked on {' and '.join(project_names[:2])}"
+#     else:
+#         project_mention = f"I can see your background in {session.topic}"
+# 
+#     ai_greeting = f"Hello {first_name}! Welcome to your {normalized_role} interview. {project_mention} — let us see how deep your knowledge goes today. We will focus on {session.topic}. I will ask you {session.total_questions} questions and give you feedback after each answer. Let us begin. {personalized_q1}"
+# 
+#     # FIX 7 — Enhanced system prompt
+#     system_prompt = f"""You are a strict MNC technical interviewer at a top company conducting a real {normalized_role} interview.
+# 
+# Candidate Profile:
+# - Name: {current_user.name}
+# - Skills: {resume_ctx.skills}
+# - Projects/Work: {', '.join(project_names) if project_names else 'None provided'}
+# - Background: {experience_context}
+# 
+# Your Behavior Rules:
+# - Ask exactly ONE question at a time
+# - After candidate answers, give 1-2 line feedback
+# - Use words like 'Good point' or 'That needs more depth'
+# - Never reveal the score
+# - If answer is too short, say 'Can you elaborate further?'
+# - If answer is wrong, say 'Not quite — think about it from a {session.topic} perspective'
+# - Stay in interviewer character throughout
+# - Topic focus: {session.topic}
+# - Difficulty: {session.difficulty}
+# - Total questions: {session.total_questions}"""
+# 
+#     conversation_history = [
+#         {"role": "system", "content": system_prompt},
+#         {"role": "assistant", "content": ai_greeting}
+#     ]
+# 
+#     # FIX 8 — Enhanced questions_list format
+#     questions_list = [
+#         {
+#             "order": 1,
+#             "question": personalized_q1,
+#             "difficulty": "easy",
+#             "resume_based": True,
+#             "tip": tips[0]
+#         },
+#         {
+#             "order": 2,
+#             "question": q2.text,
+#             "difficulty": "easy", 
+#             "resume_based": False,
+#             "tip": tips[1]
+#         },
+#         {
+#             "order": 3,
+#             "question": personalized_q3,
+#             "difficulty": "medium",
+#             "resume_based": True,
+#             "tip": tips[2]
+#         }
+#     ]
+# 
+#     return {
+#         "success": True,
+#         "enhanced": True,
+#         "questions_list": questions_list,
+#         "ai_greeting": ai_greeting,
+#         "conversation_history": conversation_history
+#     }
 
 
 from fastapi import Request
@@ -1677,19 +1677,333 @@ def launch_and_confirm_interview(
             if session.total_questions > 5:
                 raise HTTPException(status_code=403, detail="Free plan allows maximum 5 questions only")
                 
-        # 4. Call the existing confirm-start logic internally
-        try:
-            result = confirm_start(payload=payload, db=db, current_user=current_user)
-            if not result.get("success"):
-                raise HTTPException(status_code=404, detail=result.get("error", "No questions available"))
-            ai_greeting = result["ai_greeting"]
-            questions_list = result["questions_list"]
-            conversation_history = result["conversation_history"]
-        except HTTPException as he:
-            raise he
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="Failed to generate interview questions")
+        # 4. Generate Questions & JWT Payload (Without calling confirm_start)
+        from datetime import datetime
+        if session.started_at is None:
+            session.started_at = datetime.utcnow()
+            db.commit()
+
+        # Step 1: Session details
+        role_from_session = session.role or ""
+        topic_from_session = session.topic or ""
+        difficulty_from_session = session.difficulty or "medium"
+        resume_id = session.resume_id
+        
+        # Check if questions already exist for this session
+        existing_sqs = db.query(models.SessionQuestion).filter(
+            models.SessionQuestion.session_id == session.id
+        ).order_by(models.SessionQuestion.question_order).all()
+        
+        selected_qs = []
+
+        if len(existing_sqs) > 0:
+            selected_qs = [sq.question for sq in existing_sqs if sq.question]
+            # Questions were already generated previously, we just use them.
+        else:
+            # Step 2: Fetch question pool & filter
+            from sqlalchemy import func
+            pool = db.query(models.Question).filter(
+                func.lower(models.Question.role) == func.lower(role_from_session),
+                func.lower(models.Question.domain) == func.lower(topic_from_session)
+            ).all()
+
+            # Step 3: Select exactly according to duration
+            import random
+            dur = session.duration_minutes
+            if dur == 5:
+                num_easy, num_medium, num_hard = 2, 1, 0
+            elif dur == 20:
+                num_easy, num_medium, num_hard = 4, 4, 2
+            else: # 10 min
+                num_easy, num_medium, num_hard = 2, 2, 1
+
+            easy_pool = [q for q in pool if (q.difficulty or '').lower() == 'easy']
+            medium_pool = [q for q in pool if (q.difficulty or '').lower() == 'medium']
+            hard_pool = [q for q in pool if (q.difficulty or '').lower() == 'hard']
+
+            random.shuffle(easy_pool)
+            random.shuffle(medium_pool)
+            random.shuffle(hard_pool)
+
+            selected_easy = easy_pool[:num_easy]
+            selected_medium = medium_pool[:num_medium]
+            selected_hard = hard_pool[:num_hard]
+
+            missing_easy = num_easy - len(selected_easy)
+            missing_medium = num_medium - len(selected_medium)
+            missing_hard = num_hard - len(selected_hard)
+
+            # Step 4: Generate missing using Groq
+            def generate_missing(difficulty, count):
+                if count <= 0:
+                    return []
+                try:
+                    import os, json
+                    from groq import Groq
+                    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+                    prompt = f"You are an expert technical interviewer hiring for a {role_from_session} position.\nGenerate EXACTLY {count} practical, scenario-based interview questions for a {difficulty} level {role_from_session} interview.\nCRITICAL REQUIREMENT: The topic/domain is exclusively {topic_from_session}. DO NOT ask generic definition questions like 'What is X?'. Instead, ask applied, real-world questions like 'As a {role_from_session}, how would you use {topic_from_session} to solve [specific problem]?'.\nReturn ONLY valid JSON with a key 'questions' containing a list of strings."
+                    resp = client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": "system", "content": prompt}],
+                        temperature=0.7,
+                        response_format={"type": "json_object"}
+                    )
+                    gen_data = json.loads(resp.choices[0].message.content)
+                    new_texts = gen_data.get("questions", [])
+                    generated = []
+                    for text in new_texts[:count]:
+                        # Check if question already exists for this role/domain
+                        normalized_text = text.strip().lower()
+                        existing_q = db.query(models.Question).filter(
+                            func.lower(models.Question.text) == normalized_text,
+                            func.lower(models.Question.role) == func.lower(role_from_session),
+                            func.lower(models.Question.domain) == func.lower(topic_from_session)
+                        ).first()
+                        
+                        if existing_q:
+                            generated.append(existing_q)
+                        else:
+                            new_q = models.Question(
+                                text=text.strip(),
+                                type='topic',
+                                difficulty=difficulty,
+                                role=role_from_session,
+                                domain=topic_from_session,
+                                is_company_question=False,
+                                frequency_score=1
+                            )
+                            db.add(new_q)
+                            db.flush() # flush to get id without committing transaction fully
+                            generated.append(new_q)
+                    return generated
+                except Exception as e:
+                    print(f"Auto-generate missing {difficulty} questions failed:", e)
+                    return []
+
+            selected_easy.extend(generate_missing('easy', missing_easy))
+            selected_medium.extend(generate_missing('medium', missing_medium))
+            selected_hard.extend(generate_missing('hard', missing_hard))
+
+            # Final order: append available questions
+            selected_qs = selected_easy + selected_medium + selected_hard
+
+            # Ensure we have correct number of questions
+            req_qs = 3 if session.duration_minutes == 5 else (10 if session.duration_minutes == 20 else 5)
+            while len(selected_qs) < req_qs:
+                # Emergency fallback if generation failed
+                fallback_q = models.Question(text=f"As a {role_from_session}, what is the most complex problem you have solved using {topic_from_session}?", type='topic', difficulty='medium', role=role_from_session, domain=topic_from_session, is_company_question=False, frequency_score=1)
+                db.add(fallback_q)
+                db.flush()
+                selected_qs.append(fallback_q)
+
+            # Step 5: Resume Context & Personalization (Q1 & Q3)
+            resume_context_is_empty = True
+            resume_skills, resume_projects, resume_experience, resume_education = [], [], [], []
+            if resume_id:
+                profiles = db.query(models.UserProfile).join(models.Attribute).filter(
+                    models.UserProfile.user_id == current_user.id,
+                    models.UserProfile.resume_id == resume_id,
+                    models.Attribute.code.in_([
+                        'technical_skills', 'skills', 'projects', 
+                        'experience', 'education', 'project_details',
+                        'professional_experience', 'achievements', 'key_results'
+                    ])
+                ).all()
+                for p in profiles:
+                    if p.value and p.value.strip():
+                        if p.attribute.code in ['technical_skills', 'skills']:
+                            resume_skills.append(p.value)
+                        elif p.attribute.code in ['projects', 'project_details', 'achievements', 'key_results']:
+                            resume_projects.append(p.value)
+                        elif p.attribute.code in ['experience', 'professional_experience']:
+                            resume_experience.append(p.value)
+                        elif p.attribute.code in ['education']:
+                            resume_education.append(p.value)
             
+            class ResumeContext:
+                def __init__(self, s, p, e, ed):
+                    self.skills = "\n".join(s) if s else "Not provided"
+                    self.projects = "\n".join(p) if p else "Not provided"
+                    self.experience = "\n".join(e) if e else "Not provided"
+                    self.education = "\n".join(ed) if ed else "Not provided"
+                    self.is_empty = not (s or p or e or ed)
+
+            resume_ctx = ResumeContext(resume_skills, resume_projects, resume_experience, resume_education)
+            resume_context_is_empty = resume_ctx.is_empty
+
+            def extract_project_names(projects_text):
+                lines = projects_text.split('\n')
+                p_names = []
+                for line in lines:
+                    line = line.strip()
+                    if '|' in line:
+                        name = line.split('|')[0].strip()
+                        if len(name) > 3:
+                            p_names.append(name)
+                    elif ' - ' in line and len(line) < 60:
+                        name = line.split(' - ')[0].strip()
+                        if len(name) > 3:
+                            p_names.append(name)
+                return p_names[:3]
+
+            project_names = extract_project_names(resume_ctx.projects)
+
+            if not resume_context_is_empty:
+                import os, json
+                from groq import Groq
+                client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+                prompt_sys = "You are an expert interview question personalizer and coach. Return ONLY valid JSON. No markdown formatting, no backticks, no explanation."
+                q_input_str = "\n".join([f"Q{i+1} ({q.difficulty}): {q.text}" for i, q in enumerate(selected_qs)])
+                rule_str = f"1. Rewrite ALL {len(selected_qs)} questions to mention a specific project name, achievement, or skill from the profile."
+                json_keys = ", ".join([f'"q{i+1}": "rewritten q{i+1} here"' for i in range(len(selected_qs))])
+                json_format = f'{{\n  "personalized": {{{json_keys}}}\n}}'
+
+                prompt_user = f"""Candidate profile:
+- Role applying for: {role_from_session}
+- Domain/Topic: {topic_from_session}
+- Skills: {resume_ctx.skills}
+- Projects/Achievements: {', '.join(project_names) if project_names else 'None'}
+
+Questions:
+{q_input_str}
+
+Rules:
+{rule_str}
+2. Generate a question relevant ONLY to the {role_from_session} skillset and the candidate's actual listed skills/tools. You may reference the candidate's resume project names for context, but NEVER introduce technical concepts, tools, or terminology outside {role_from_session}'s domain (e.g. do not mention machine learning, supervised/unsupervised learning, deep learning, etc. for a Data Analyst role) unless those exact terms appear in the candidate's resume skills list.
+3. Keep the same difficulty and intent as the original questions. Keep questions concise to ensure the candidate can complete the interview within the duration limit.
+4. Try to pick a DIFFERENT resume skill/project reference for each question where possible to avoid repetition.
+5. Maximum 1 sentence for each rewritten question.
+6. Return ONLY this JSON:
+{json_format}"""
+
+                ml_terms = ["supervised learning", "unsupervised learning", "neural network", "deep learning", "machine learning model"]
+                resume_text_lower = (resume_ctx.skills + " " + resume_ctx.projects + " " + resume_ctx.experience).lower()
+
+                pers = None
+                for attempt in range(3):
+                    try:
+                        response = client.chat.completions.create(
+                            model="llama-3.3-70b-versatile",
+                            messages=[
+                                {"role": "system", "content": prompt_sys},
+                                {"role": "user", "content": prompt_user}
+                            ],
+                            temperature=0.3,
+                            max_tokens=1000,
+                            response_format={"type": "json_object"}
+                        )
+                        resp_text = response.choices[0].message.content.strip()
+                        ai_data = json.loads(resp_text)
+                        
+                        if "personalized" in ai_data:
+                            temp_pers = ai_data["personalized"]
+                            # Enforce all keys present
+                            if len(temp_pers) < len(selected_qs):
+                                continue
+                            
+                            valid = True
+                            for q_k, q_text in temp_pers.items():
+                                q_lower = q_text.lower()
+                                for term in ml_terms:
+                                    if term in q_lower and term not in resume_text_lower:
+                                        valid = False
+                                        break
+                                if not valid:
+                                    break
+                            
+                            if valid:
+                                pers = temp_pers
+                                break
+                    except Exception as e:
+                        print(f"Personalization attempt {attempt+1} failed:", e)
+
+                if pers:
+                    for i in range(len(selected_qs)):
+                        q_key = f"q{i+1}"
+                        if q_key in pers:
+                            generated_text = pers[q_key].strip()
+                            from sqlalchemy import func
+                            existing_q = db.query(models.Question).filter(
+                                func.lower(models.Question.text) == func.lower(generated_text),
+                                func.lower(models.Question.role) == func.lower(role_from_session),
+                                func.lower(models.Question.domain) == func.lower(topic_from_session)
+                            ).first()
+                            
+                            if existing_q:
+                                selected_qs[i] = existing_q
+                            else:
+                                new_q = models.Question(
+                                    text=generated_text, 
+                                    type='resume', 
+                                    difficulty=selected_qs[i].difficulty, 
+                                    role=role_from_session, 
+                                    domain=topic_from_session, 
+                                    is_company_question=False, 
+                                    frequency_score=1
+                                )
+                                db.add(new_q)
+                                db.flush()
+                                selected_qs[i] = new_q
+
+            # Step 6: INSERT into session_questions
+            for idx, q in enumerate(selected_qs):
+                sq = models.SessionQuestion(
+                    session_id=session.id,
+                    question_id=q.id,
+                    question_order=idx + 1,
+                    answer_text=None,
+                    score=None,
+                    ai_feedback=None,
+                    is_skipped=False
+                )
+                db.add(sq)
+            db.commit()
+
+        # Build questions_list and ai_greeting
+        questions_list = []
+        for idx, q in enumerate(selected_qs):
+            is_rb = (q.type == 'resume')
+            questions_list.append({
+                "order": idx + 1,
+                "question": q.text,
+                "difficulty": q.difficulty or "medium",
+                "resume_based": is_rb,
+                "tip": "Provide a clear explanation."
+            })
+
+        first_name = current_user.name.split(' ')[0]
+        # Resolve project_names locally for the greeting
+        project_names = []
+        if resume_id:
+            projects_profile = db.query(models.UserProfile).join(models.Attribute).filter(
+                models.UserProfile.user_id == current_user.id,
+                models.UserProfile.resume_id == resume_id,
+                models.Attribute.code.in_(['projects', 'project_details', 'achievements', 'key_results'])
+            ).all()
+            p_text = "\n".join([p.value for p in projects_profile if p.value and p.value.strip()])
+            if p_text:
+                lines = p_text.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if '|' in line and len(line.split('|')[0].strip()) > 3:
+                        project_names.append(line.split('|')[0].strip())
+                    elif ' - ' in line and len(line) < 60 and len(line.split(' - ')[0].strip()) > 3:
+                        project_names.append(line.split(' - ')[0].strip())
+                project_names = project_names[:3]
+
+        if len(project_names) > 0:
+            project_mention = f"I can see you have worked on {' and '.join(project_names[:2])}"
+        else:
+            project_mention = f"I can see your background in {topic_from_session}"
+
+        ai_greeting = f"Hello {first_name}! Welcome to your {role_from_session} interview. {project_mention} — let us see how deep your knowledge goes today. We will focus on {topic_from_session}. I will ask you {session.total_questions} questions and give you feedback after each answer. Let us begin. {selected_qs[0].text if selected_qs else ''}"
+
+        system_prompt = f"You are a strict MNC technical interviewer at a top company conducting a real {role_from_session} interview.\nAsk exactly ONE question at a time.\nTopic focus: {topic_from_session}. Difficulty: {difficulty_from_session}. Total questions: {session.total_questions}."
+        conversation_history = [
+            {"role": "system", "content": system_prompt},
+            {"role": "assistant", "content": ai_greeting}
+        ]
+
         # 5. Build Streamlit redirect URL
         base = "https://interviewai-nfpypdpihrbukcmlrhwolb.streamlit.app"
         
@@ -1705,119 +2019,6 @@ def launch_and_confirm_interview(
         })
         
         full_streamlit_url = f"{base}?session_id={signed_session_id}"
-        
-        # --- STEP 1 to 5: Custom Question Logic ---
-        existing_sq_count = db.query(models.SessionQuestion).filter(
-            models.SessionQuestion.session_id == session.id
-        ).count()
-        
-        if existing_sq_count == 0:
-            # Step 1: Session details
-            role_from_session = session.role or ""
-            topic_from_session = session.topic or ""
-            difficulty_from_session = session.difficulty or "medium"
-            resume_id = session.resume_id
-            
-            # Step 2: Fetch question pool
-            from sqlalchemy import case, func
-            difficulty_order = case(
-                (models.Question.difficulty == 'easy', 1),
-                (models.Question.difficulty == 'medium', 2),
-                (models.Question.difficulty == 'hard', 3),
-                else_=4
-            )
-            pool = db.query(models.Question).filter(
-                func.lower(models.Question.role) == func.lower(role_from_session),
-                func.lower(models.Question.domain) == func.lower(topic_from_session)
-            ).order_by(difficulty_order).limit(20).all()
-            
-            # Step 3: Select exactly 5 questions
-            selected_qs = []
-            
-            easy_qs = [q for q in pool if (q.difficulty or '').lower() == 'easy']
-            for q in easy_qs[:2]:
-                selected_qs.append(q)
-                if q in pool: pool.remove(q)
-                
-            medium_qs = [q for q in pool if (q.difficulty or '').lower() == 'medium']
-            if medium_qs:
-                selected_qs.append(medium_qs[0])
-                if medium_qs[0] in pool: pool.remove(medium_qs[0])
-                
-            adaptive_qs = []
-            if resume_id:
-                resume = db.query(models.Resume).filter(models.Resume.id == resume_id).first()
-                if resume and resume.skills:
-                    skills = [s.strip().lower() for s in resume.skills.split(',') if s.strip()]
-                    if skills:
-                        for q in list(pool):
-                            q_text_lower = (q.text or "").lower()
-                            if any(skill in q_text_lower for skill in skills):
-                                adaptive_qs.append(q)
-                                pool.remove(q)
-                                if len(adaptive_qs) == 2:
-                                    break
-                                    
-            remaining = 2 - len(adaptive_qs)
-            if remaining > 0:
-                for q in list(pool):
-                    if (q.difficulty or '').lower() in ['medium', 'hard']:
-                        adaptive_qs.append(q)
-                        pool.remove(q)
-                        remaining -= 1
-                        if remaining == 0:
-                            break
-                            
-            selected_qs.extend(adaptive_qs)
-            
-            # Step 4: Generate missing using Groq
-            missing_count = 5 - len(selected_qs)
-            if missing_count > 0:
-                try:
-                    import os, json
-                    from groq import Groq
-                    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-                    prompt = f"You are an expert technical interviewer.\nGenerate EXACTLY {missing_count} short interview questions for a {difficulty_from_session} level {role_from_session} interview.\nThe topic/domain is: {topic_from_session}.\nReturn ONLY valid JSON with a key 'questions' containing a list of strings."
-                    resp = client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=[{"role": "system", "content": prompt}],
-                        temperature=0.7,
-                        response_format={"type": "json_object"}
-                    )
-                    gen_data = json.loads(resp.choices[0].message.content)
-                    new_texts = gen_data.get("questions", [])
-                    
-                    for text in new_texts[:missing_count]:
-                        new_q = models.Question(
-                            text=text,
-                            type='topic',
-                            difficulty=difficulty_from_session,
-                            role=role_from_session,
-                            domain=topic_from_session,
-                            is_company_question=False,
-                            frequency_score=1
-                        )
-                        db.add(new_q)
-                        db.commit()
-                        db.refresh(new_q)
-                        selected_qs.append(new_q)
-                except Exception as e:
-                    print("Auto-generate missing questions failed:", e)
-            
-            # Step 5: INSERT into session_questions
-            for idx, q in enumerate(selected_qs[:5]):
-                sq = models.SessionQuestion(
-                    session_id=session.id,
-                    question_id=q.id,
-                    question_order=idx + 1,
-                    answer_text=None,
-                    score=None,
-                    ai_feedback=None,
-                    is_skipped=False
-                )
-                db.add(sq)
-            db.commit()
-        # --- END NEW LOGIC ---
 
         return {
             "success": True,
@@ -1861,13 +2062,27 @@ def verify_session(
     if not session:
         raise HTTPException(status_code=404, detail="Invalid session")
         
+    user = db.query(models.User).filter(models.User.id == userid).first()
+    resume = db.query(models.Resume).filter(models.Resume.id == session.resume_id).first()
+    skills_str = resume.skills if resume and resume.skills else "your listed skills"
+    
+    first_sq = db.query(models.SessionQuestion).filter(
+        models.SessionQuestion.session_id == session.id,
+        models.SessionQuestion.question_order == 1
+    ).first()
+    first_q_text = first_sq.question.text if first_sq and first_sq.question else "Can you introduce yourself?"
+    
+    topic_str = session.topic if session.topic else "your field"
+    ai_greeting = f"Hello {user.name if user else 'there'}! Welcome to your {session.role} interview. I can see your background in {topic_str} — let us see how deep your knowledge goes today. We will focus on {topic_str}. I will ask you {session.total_questions} questions and give you feedback after each answer. Let us begin. {first_q_text}"
+    
     # 3. Return
     return {
         "success": True,
         "session_id": actual_session_id,
         "status": session.status,
         "duration_minutes": session.duration_minutes,
-        "total_questions": session.total_questions
+        "total_questions": session.total_questions,
+        "ai_greeting": ai_greeting
     }
 
 
@@ -1877,6 +2092,11 @@ def submit_answer(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    import os
+    import json
+    from groq import Groq
+    from datetime import datetime
+
     if payload.userid != current_user.id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
@@ -1904,23 +2124,22 @@ def submit_answer(
         user_msg = payload.answer
     history.append({"role": "user", "content": user_msg})
     next_q_num = payload.question_number + 1
-    interview_complete = next_q_num > session.total_questions
+    interview_complete = payload.question_number >= session.total_questions
     # Fetch or generate the exact next question from Session_Questions (if interview is not complete)
     next_question_text = ""
     if not interview_complete:
-        if next_q_num <= 3:
-            next_sq = db.query(models.SessionQuestion).filter(
-                models.SessionQuestion.session_id == session.id,
-                models.SessionQuestion.question_order == next_q_num
-            ).first()
-            next_question_text = next_sq.question.text if next_sq and next_sq.question else "Can you elaborate further?"
+        next_sq = db.query(models.SessionQuestion).filter(
+            models.SessionQuestion.session_id == session.id,
+            models.SessionQuestion.question_order == next_q_num
+        ).first()
+        base_next_question = next_sq.question.text if next_sq and next_sq.question else "Can you elaborate further?"
+        
+        if session.duration_minutes != 5:
+            # 10-min and 20-min strictly follow sequential questions without adaptive rewriting
+            next_question_text = base_next_question
         else:
-            # Generate adaptive question!
+            # 5-min tier generates adaptive question based on response quality AND pre-generated personalized question
             try:
-                import json
-                import os
-                from groq import Groq
-                
                 groq_api_key = os.getenv("GROQ_API_KEY")
                 client = Groq(api_key=groq_api_key)
                 
@@ -1934,9 +2153,13 @@ Topic: {session.topic}
 Based on the recent conversation:
 {history_text}
 
-Generate ONE short, adaptive follow-up interview question (max 15 words).
-- If the user answered well, make it slightly harder or deeper.
-- If the user struggled, ask a simpler fundamental question related to {session.topic}.
+The PRE-PLANNED next question to ask is:
+"{base_next_question}"
+
+Generate ONE short, adaptive version of this pre-planned question (max 15 words).
+- Make sure to keep the core intent and any personalization (like mentioned projects/skills) from the pre-planned question.
+- If the user answered the previous question very well, frame this next question to be slightly harder or deeper.
+- If the user struggled, simplify the framing of this next question to be more fundamental.
 - NEVER ask them to write code.
 Return ONLY valid JSON with the key "question"."""
                 
@@ -1947,45 +2170,44 @@ Return ONLY valid JSON with the key "question"."""
                     response_format={"type": "json_object"}
                 )
                 ai_data = json.loads(resp.choices[0].message.content)
-                next_question_text = ai_data.get("question", f"Can you elaborate on your experience with {session.topic}?")
+                next_question_text = ai_data.get("question", base_next_question)
                 
                 # Save dynamically generated question to questions table
-                new_q = models.Question(
-                    text=next_question_text,
-                    type='topic',
-                    difficulty=session.difficulty,
-                    role=session.role,
-                    domain=session.topic,
-                    is_company_question=False,
-                    frequency_score=1
-                )
-                db.add(new_q)
-                db.flush()
+                from sqlalchemy import func
+                existing_q = db.query(models.Question).filter(
+                    func.lower(models.Question.text) == func.lower(next_question_text.strip()),
+                    func.lower(models.Question.role) == func.lower(session.role),
+                    func.lower(models.Question.domain) == func.lower(session.topic)
+                ).first()
+                if existing_q:
+                    new_q = existing_q
+                else:
+                    new_q = models.Question(
+                        text=next_question_text,
+                        type='topic',
+                        difficulty=session.difficulty,
+                        role=session.role,
+                        domain=session.topic,
+                        is_company_question=False,
+                        frequency_score=1
+                    )
+                    db.add(new_q)
+                    db.flush()
                 
-                # Save to session_questions
-                sq = models.SessionQuestion(
-                    session_id=session.id,
-                    question_id=new_q.id,
-                    question_order=next_q_num,
-                    answer_text=None,
-                    score=None,
-                    ai_feedback=None,
-                    is_skipped=False
-                )
-                db.add(sq)
+                if next_sq:
+                    next_sq.question_id = new_q.id
                 db.commit()
             except Exception as e:
                 print("Failed to generate adaptive question:", e)
                 next_question_text = f"Can you tell me more about your experience with {session.topic}?"
     # Evaluate using Groq LLM
     try:
-        import json
         groq_api_key = os.getenv("GROQ_API_KEY")
         client = Groq(api_key=groq_api_key)
         
         system_instruction = f"""Evaluate the user's answer.
 Respond in valid JSON format ONLY, with the following keys:
-- "feedback_to_user": A 1-2 sentence brief feedback acknowledging their answer. Do NOT provide the correct solution. NEVER ask follow-up questions, and NEVER ask the user to write code or queries.
+- "feedback_to_user": A VERY SHORT conversational response to the candidate (MAXIMUM 15 words). Acknowledge their answer briefly. Do NOT provide the correct solution. Do NOT justify or lecture the user. NEVER ask follow-up questions, and NEVER ask the user to write code or queries.
 - "ai_feedback": A private detailed technical evaluation of their answer (what was missing, what was good).
 - "score": An integer score from 0 to 10 based on accuracy and depth.
 User answered: {user_msg}"""
@@ -2558,18 +2780,17 @@ Transcript:
         questions_data = eval_data.get("questions", [])
         report_data = eval_data.get("report", {})
         
-        # INSERT into Session_Questions
+        # UPDATE Session_Questions
         for i, q_data in enumerate(questions_data, start=1):
-            sq = models.SessionQuestion(
-                session_id=payload.session_id,
-                question_id=1,  # Placeholder as requested
-                question_order=i,
-                answer_text=q_data.get("answer_text", ""),
-                score=q_data.get("score", 0),
-                ai_feedback=q_data.get("ai_feedback", ""),
-                is_skipped=q_data.get("is_skipped", False)
-            )
-            db.add(sq)
+            sq = db.query(models.SessionQuestion).filter(
+                models.SessionQuestion.session_id == payload.session_id,
+                models.SessionQuestion.question_order == i
+            ).first()
+            if sq:
+                sq.answer_text = q_data.get("answer_text", "")
+                sq.score = q_data.get("score", 0)
+                sq.ai_feedback = q_data.get("ai_feedback", "")
+                sq.is_skipped = q_data.get("is_skipped", False)
         
         # INSERT into Interview_Report
         # Note: as requested, json.dumps() is used for strengths and improvements
@@ -2594,11 +2815,70 @@ Transcript:
         
         db.commit()
         
-        return {{"success": True, "message": "Interview evaluated and saved successfully"}}
-        
+        return {"success": True, "message": "Interview evaluated and saved successfully"}
+
     except json.JSONDecodeError:
         db.rollback()
         raise HTTPException(status_code=500, detail="GPT returned invalid JSON")
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/interview/generate-report", summary="Generate and download PDF report")
+def generate_interview_report(
+    session_id: str,
+    userid: int,
+    db: Session = Depends(get_db)
+):
+    from fastapi.responses import FileResponse
+    from report_generator import evaluate_interview, generate_pdf_report
+    
+    actual_session_id = session_id
+    if isinstance(actual_session_id, str):
+        try:
+            import json, base64
+            if '.' in actual_session_id:
+                token_payload_b64 = actual_session_id.split('.')[1]
+                token_payload_b64 += '=' * ((4 - len(token_payload_b64) % 4) % 4)
+                token_payload = json.loads(base64.urlsafe_b64decode(token_payload_b64).decode('utf-8'))
+                if 'session_id' in token_payload:
+                    actual_session_id = token_payload['session_id']
+        except Exception:
+            pass
+            
+    session = db.query(models.InterviewSession).filter(
+        models.InterviewSession.id == actual_session_id,
+        models.InterviewSession.user_id == userid
+    ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found or access denied")
+        
+    user = db.query(models.User).filter(models.User.id == userid).first()
+    
+    questions = db.query(models.SessionQuestion).filter(
+        models.SessionQuestion.session_id == session.id
+    ).order_by(models.SessionQuestion.question_order).all()
+    
+    report = evaluate_interview(session, questions, user, db)
+    if not report:
+        raise HTTPException(status_code=500, detail="Failed to evaluate interview report")
+        
+    try:
+        pdf_path = generate_pdf_report(session, questions, user, report)
+    except Exception as e:
+        print(f"PDF generation failed on first attempt: {e}")
+        try:
+            pdf_path = generate_pdf_report(session, questions, user, report)
+        except Exception as e2:
+            print(f"PDF generation failed on second attempt: {e2}")
+            raise HTTPException(status_code=500, detail=f"PDF Report Generation Failed: {e2}")
+            
+    if not os.path.exists(pdf_path):
+        raise HTTPException(status_code=500, detail=f"PDF file generated but not found at {pdf_path}")
+    
+    return FileResponse(
+        path=pdf_path,
+        media_type='application/pdf',
+        filename=f"{user.name.replace(' ', '_')}_Interview_Report.pdf"
+    )
