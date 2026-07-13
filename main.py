@@ -2123,6 +2123,14 @@ def submit_answer(
     else:
         user_msg = payload.answer
     history.append({"role": "user", "content": user_msg})
+    if payload.question_number > session.total_questions:
+        return {
+            "next_ai_message": "The interview is already complete.",
+            "conversation_history": payload.conversation_history,
+            "question_number": payload.question_number,
+            "interview_complete": True
+        }
+
     next_q_num = payload.question_number + 1
     interview_complete = payload.question_number >= session.total_questions
     # Fetch or generate the exact next question from Session_Questions (if interview is not complete)
@@ -2245,7 +2253,7 @@ User answered: {user_msg}"""
         current_sq.answered_at = datetime.utcnow()
         db.commit()
     if interview_complete:
-        next_ai_message = f"{feedback_to_user} Thank you! That concludes our interview. I have gathered enough information to generate your report. You can now end the session."
+        next_ai_message = "Thank you! That concludes our interview. I have gathered enough information to generate your report. You will now be redirected."
     else:
         # Ask the exact next question from the database
         next_ai_message = f"{feedback_to_user}\n\n{next_question_text}"
