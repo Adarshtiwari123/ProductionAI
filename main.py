@@ -883,8 +883,7 @@ def get_allowed_durations(
 
     # STEP 1 - Get credits_remaining from Usage_Tracker
     usage = db.query(models.UsageTracker).filter(
-        models.UsageTracker.user_id == current_user.id,
-        models.UsageTracker.period_end >= today
+        models.UsageTracker.user_id == current_user.id
     ).order_by(models.UsageTracker.id.desc()).first()
     
     credits_remaining = usage.credits_remaining if usage else 0
@@ -1013,8 +1012,7 @@ def validate_and_setup_interview(
         
         # Query Usage_Tracker for the current period
         usage = db.query(models.UsageTracker).filter(
-            models.UsageTracker.user_id == current_user.id,
-            models.UsageTracker.period_end >= today
+            models.UsageTracker.user_id == current_user.id
         ).order_by(models.UsageTracker.id.desc()).first()
 
         if not usage:
@@ -1228,8 +1226,7 @@ def get_session_summary(
         today = datetime.utcnow().date()
         
         usage = db.query(models.UsageTracker).filter(
-            models.UsageTracker.user_id == userid,
-            models.UsageTracker.period_end >= today
+            models.UsageTracker.user_id == userid
         ).order_by(models.UsageTracker.id.desc()).first()
 
         credits_remaining = usage.credits_remaining if usage else 0
