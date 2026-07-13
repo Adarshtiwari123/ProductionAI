@@ -881,12 +881,11 @@ def get_allowed_durations(
     from datetime import datetime
     today = datetime.utcnow().date()
 
-    # STEP 1 - Get credits_remaining from Usage_Tracker
     usage = db.query(models.UsageTracker).filter(
         models.UsageTracker.user_id == current_user.id
     ).order_by(models.UsageTracker.id.desc()).first()
     
-    credits_remaining = usage.credits_remaining if usage else 0
+    credits_remaining = current_user.interview_limit
 
     # STEP 2 - Get credit costs from Packages via Subscription
     subscription = db.query(models.Subscription).filter(
@@ -1010,15 +1009,12 @@ def validate_and_setup_interview(
         # STEP 1 - Re-run access check
         today = datetime.utcnow().date()
         
-        # Query Usage_Tracker for the current period
+        # Query Usage_Tracker for the current period to ensure we can update stats later if needed
         usage = db.query(models.UsageTracker).filter(
             models.UsageTracker.user_id == current_user.id
         ).order_by(models.UsageTracker.id.desc()).first()
 
-        if not usage:
-             raise HTTPException(status_code=403, detail="No usage record found. Please ensure you have an active plan.")
-
-        credits_remaining = usage.credits_remaining
+        credits_remaining = current_user.interview_limit
         
         # Calculate cost
         cost = DURATION_CREDIT_MAP[payload.duration_minutes]
@@ -1062,32 +1058,30 @@ def validate_and_setup_interview(
         db.add(new_session)
         db.flush() # To get the session ID
 
-        # STEP 5 - Update Usage_Tracker (Deduct Credits)
+        # STEP 5 - Update users table (Deduct Credits)
         required_credits = DURATION_CREDIT_MAP[payload.duration_minutes]
         
         result = db.execute(text("""
-            UPDATE "usage_tracker" 
-            SET credits_remaining = credits_remaining - :req_credits,
-                credits_used = credits_used + :req_credits,
-                sessions_used = sessions_used + 1,
+            UPDATE users 
+            SET interview_limit = interview_limit - :req_credits,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = :user_id 
-            AND credits_remaining >= :req_credits
+            WHERE id = :user_id 
+            AND interview_limit >= :req_credits
         """), {"req_credits": required_credits, "user_id": current_user.id})
 
         if result.rowcount == 0:
             db.rollback()
             raise HTTPException(status_code=400, detail="Insufficient credits or concurrent update failed")
 
+        # Sync to usage_tracker to keep stats accurate
         db.execute(text("""
-            UPDATE users SET
-               interview_limit = (
-                 SELECT credits_remaining FROM "usage_tracker"
-                 WHERE user_id = :user_id
-                 ORDER BY created_at DESC LIMIT 1
-               )
-             WHERE id = :user_id
-        """), {"user_id": current_user.id})
+            UPDATE "usage_tracker" 
+            SET credits_remaining = (SELECT interview_limit FROM users WHERE id = :user_id),
+                credits_used = credits_used + :req_credits,
+                sessions_used = sessions_used + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = :user_id
+        """), {"req_credits": required_credits, "user_id": current_user.id})
 
         db.commit()
 
@@ -1229,7 +1223,7 @@ def get_session_summary(
             models.UsageTracker.user_id == userid
         ).order_by(models.UsageTracker.id.desc()).first()
 
-        credits_remaining = usage.credits_remaining if usage else 0
+        credits_remaining = user.interview_limit if user else 0
 
         return {
             "success": True,
